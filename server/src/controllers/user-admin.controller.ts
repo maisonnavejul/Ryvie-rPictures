@@ -192,55 +192,69 @@ export class UserAdminController {
       
       let created = 0;
       let skipped = 0;
+      let updated = 0;
 
       for (const ldapUser of ldapUsers) {
         try {
           this.logger.log(`Traitement de l'utilisateur LDAP: ${ldapUser.mail}`);
-          // Vérifier si l'utilisateur existe déjà
-          const existingUser = await this.userRepository.getByEmail(ldapUser.mail);
-          if (existingUser) {
-            // Mettre à jour les droits d'administration si nécessaire
-            if (existingUser.isAdmin !== ldapUser.isAdmin) {
-              await this.userRepository.update(existingUser.id, {
-                isAdmin: ldapUser.isAdmin
-              });
-              this.logger.log(`Mise à jour des droits admin pour ${ldapUser.mail}: ${ldapUser.isAdmin}`);
-            }
-            this.logger.log(`User ${ldapUser.mail} already exists, skipping`);
-            skipped++;
-            continue;
-          }
 
-          // Utiliser le mot de passe LDAP
+          // Vérifier que le mot de passe LDAP existe
           if (!ldapUser.userPassword) {
             this.logger.warn(`Pas de mot de passe pour l'utilisateur ${ldapUser.mail}, ignoré`);
             skipped++;
             continue;
           }
 
+          // Hasher le mot de passe LDAP
           const hashedPassword = await this.cryptoRepository.hashBcrypt(ldapUser.userPassword, SALT_ROUNDS);
-          const storageLabel = `user-${randomUUID()}`;
+
+          // Vérifier si l'utilisateur existe déjà
+          const existingUser = await this.userRepository.getByEmail(ldapUser.mail);
+          if (existingUser) {
+            let needsUpdate = false;
+            const updates: any = {};
+
+            // Vérifier si les droits d'administration ont changé
+            if (existingUser.isAdmin !== ldapUser.isAdmin) {
+              updates.isAdmin = ldapUser.isAdmin;
+              needsUpdate = true;
+            }
+
+            // Vérifier si le mot de passe a changé
+            // Note: on ne peut pas comparer directement les hashs, donc on met à jour à chaque fois
+            updates.password = hashedPassword;
+            needsUpdate = true;
+
+            if (needsUpdate) {
+              await this.userRepository.update(existingUser.id, updates);
+              this.logger.log(`Mise à jour de l'utilisateur ${ldapUser.mail}`);
+              updated++;
+            } else {
+              this.logger.log(`Aucune mise à jour nécessaire pour ${ldapUser.mail}`);
+              skipped++;
+            }
+            continue;
+          }
 
           // Créer l'utilisateur
+          const storageLabel = `user-${randomUUID()}`;
           await this.userRepository.create({
             isAdmin: ldapUser.isAdmin,
             email: ldapUser.mail,
             name: ldapUser.cn[0],
             password: hashedPassword,
             storageLabel,
-            shouldChangePassword: false, // Ne pas forcer le changement de mot de passe
+            shouldChangePassword: false,
           });
           created++;
           this.logger.log(`Created user account for ${ldapUser.mail}`);
-        } catch (err) {
-          const error = err as Error;
-          this.logger.error(`Failed to create user ${ldapUser.mail}: ${error.message}`);
-          skipped++;
+        } catch (error) {
+          this.logger.error(`Error processing user ${ldapUser.mail}:`, error);
         }
       }
 
-      this.logger.log(`LDAP synchronization completed. Created: ${created}, Skipped: ${skipped}`);
-      return { created, skipped };
+      this.logger.log(`LDAP synchronization completed. Created: ${created}, Updated: ${updated}, Skipped: ${skipped}`);
+      return { created, updated, skipped };
     } catch (err) {
       const error = err as Error;
       this.logger.error(`LDAP synchronization failed: ${error.message}`);
