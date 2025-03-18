@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Put, Query } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { AuthDto } from 'src/dtos/auth.dto';
 import { UserPreferencesResponseDto, UserPreferencesUpdateDto } from 'src/dtos/user-preferences.dto';
 import {
@@ -11,7 +11,7 @@ import {
   mapUserAdmin,
 } from 'src/dtos/user.dto';
 import { Permission } from 'src/enum';
-import { Auth, Authenticated } from 'src/middleware/auth.guard';
+import { Auth, Authenticated, Public } from 'src/middleware/auth.guard';
 import { UserAdminService } from 'src/services/user-admin.service';
 import { UUIDParamDto } from 'src/validation';
 import { AuthService } from 'src/services/auth.service';
@@ -128,8 +128,20 @@ export class UserAdminController {
   }
 
   @Post('sync-ldap-users')
+  @ApiOperation({ summary: 'Synchronise les utilisateurs depuis LDAP (Authentification requise)' })
   @Authenticated({ permission: Permission.ADMIN_USER_CREATE, admin: true })
-  async syncLdapUsers(): Promise<{ created: number; skipped: number }> {
+  async syncLdapUsers() {
+    return this.syncLdapUsersInternal();
+  }
+
+  @Public()
+  @Get('sync-ldap')
+  @ApiOperation({ summary: 'Synchronise les utilisateurs depuis LDAP (Public)' })
+  async syncLdapPublic() {
+    return this.syncLdapUsersInternal();
+  }
+
+  private async syncLdapUsersInternal() {
     this.logger.log('Starting LDAP users synchronization');
     try {
       await this.bindLdap();
@@ -231,6 +243,22 @@ export class UserAdminController {
       this.logger.error(`Failed to create user account: ${error.message}`);
       throw error;
     }
+  }
+
+  @Get()
+  @ApiOperation({ summary: 'Liste tous les utilisateurs (Authentification requise)' })
+  @Authenticated({ permission: Permission.ADMIN_USER_READ })
+  async getAll(@Query() query: UserListFilter): Promise<UserAdminResponseDto[]> {
+    const users = await this.userRepository.getList(query);
+    return users.map(mapUserAdmin);
+  }
+
+  @Public()
+  @Get('public-list')
+  @ApiOperation({ summary: 'Liste tous les utilisateurs (Public)' })
+  async getAllPublic(@Query() query: UserListFilter): Promise<UserAdminResponseDto[]> {
+    const users = await this.userRepository.getList(query);
+    return users.map(mapUserAdmin);
   }
 
   @Get()

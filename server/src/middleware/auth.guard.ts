@@ -19,6 +19,9 @@ type AdminRoute = { admin?: true };
 type SharedLinkRoute = { sharedLink?: true };
 type AuthenticatedOptions = { permission?: Permission } & (AdminRoute | SharedLinkRoute);
 
+export const IS_PUBLIC_KEY = 'isPublic';
+export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
+
 export const Authenticated = (options?: AuthenticatedOptions): MethodDecorator => {
   const decorators: MethodDecorator[] = [
     ApiBearerAuth(),
@@ -75,6 +78,12 @@ export class AuthGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const targets = [context.getHandler()];
+
+    // Vérifier si la route est publique
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, targets);
+    if (isPublic) {
+      return true;
+    }
 
     const options = this.reflector.getAllAndOverride<AuthenticatedOptions | undefined>(MetadataKey.AUTH_ROUTE, targets);
     if (!options) {

@@ -352,6 +352,21 @@
         ]
       }
     },
+    "/admin/users/sync-ldap": {
+      "get": {
+        "operationId": "syncLdapPublic",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Synchronise les utilisateurs depuis LDAP (Public)",
+        "tags": [
+          "Users (admin)"
+        ]
+      }
+    },
     "/admin/users/sync-ldap-users": {
       "post": {
         "operationId": "syncLdapUsers",
@@ -372,6 +387,7 @@
             "api_key": []
           }
         ],
+        "summary": "Synchronise les utilisateurs depuis LDAP (Authentification requise)",
         "tags": [
           "Users (admin)"
         ]
