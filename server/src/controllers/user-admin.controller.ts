@@ -16,19 +16,19 @@ import { UserAdminService } from 'src/services/user-admin.service';
 import { UUIDParamDto } from 'src/validation';
 import { AuthService } from 'src/services/auth.service';
 import { SignUpDto } from 'src/dtos/auth.dto';
-import { LoggingRepository } from 'src/repositories/logging.repository';
-import { UserRepository } from 'src/repositories/user.repository';
+import { UserRepository, UserListFilter } from 'src/repositories/user.repository';
 import { CryptoRepository } from 'src/repositories/crypto.repository';
+import { LoggingRepository } from 'src/repositories/logging.repository';
 import { SALT_ROUNDS } from 'src/constants';
-import { randomUUID } from 'crypto';
 import * as ldap from 'ldapjs';
 import { promisify } from 'util';
-import { SearchEntryObject } from 'ldapjs';
+import { randomUUID } from 'crypto';
 
 interface LdapUser {
   mail: string;
   cn: string[];
   userPassword?: string;
+  isAdmin: boolean;
 }
 
 @ApiTags('Users (admin)')
@@ -77,52 +77,92 @@ export class UserAdminController {
     });
   }
 
+  private async isUserInGroup(userDn: string, groupCn: string): Promise<boolean> {
+    const search = promisify<string, ldap.SearchOptions, ldap.SearchCallbackResponse>(this.ldapClient.search.bind(this.ldapClient));
+    const results = await search('ou=users,dc=example,dc=org', {
+      scope: 'sub',
+      filter: `(&(objectClass=groupOfNames)(cn=${groupCn})(member=${userDn}))`,
+    });
+
+    return new Promise((resolve) => {
+      let found = false;
+      
+      results.on('searchEntry', () => {
+        found = true;
+      });
+
+      results.on('end', () => {
+        resolve(found);
+      });
+
+      results.on('error', () => {
+        resolve(false);
+      });
+    });
+  }
+
   private async getAllLdapUsers(): Promise<LdapUser[]> {
     const search = promisify<string, ldap.SearchOptions, ldap.SearchCallbackResponse>(this.ldapClient.search.bind(this.ldapClient));
     this.logger.log('Recherche des utilisateurs LDAP...');
+    
     const results = await search('ou=users,dc=example,dc=org', {
       scope: 'sub',
       filter: '(objectClass=inetOrgPerson)',
-      attributes: ['mail', 'cn', 'userPassword']
     });
 
     return new Promise((resolve, reject) => {
       const entries: LdapUser[] = [];
+      const promises: Promise<void>[] = [];
       
       results.on('searchEntry', (entry: ldap.SearchEntry) => {
         const ldapUser = entry.pojo as any;
         this.logger.log('Données LDAP brutes:', JSON.stringify(ldapUser, null, 2));
         
-        // Extraire les attributs du format LDAP
+        // Vérifier que les attributs requis sont présents
+        if (!ldapUser.objectName || !ldapUser.attributes) {
+          this.logger.warn(`Utilisateur LDAP invalide - DN: ${ldapUser.objectName}`);
+          return;
+        }
+
+        // Extraire les attributs
         const attributes = ldapUser.attributes.reduce((acc: any, attr: any) => {
           acc[attr.type] = attr.values;
           return acc;
         }, {});
 
-        this.logger.log('Attributs extraits:', JSON.stringify(attributes, null, 2));
-        
-        // Vérifier que les attributs requis sont présents
         if (!attributes.mail || !attributes.cn) {
-          this.logger.warn(`Utilisateur LDAP invalide - mail: ${attributes.mail}, cn: ${attributes.cn}`);
+          this.logger.warn(`Utilisateur LDAP sans email ou cn - DN: ${ldapUser.objectName}`);
           return;
         }
 
-        entries.push({
-          mail: attributes.mail[0],
-          cn: attributes.cn,
-          userPassword: attributes.userPassword ? attributes.userPassword[0] : undefined
-        });
+        // Vérifier l'appartenance aux groupes
+        promises.push(
+          this.isUserInGroup(ldapUser.objectName, 'admins')
+            .then(isAdmin => {
+              entries.push({
+                mail: attributes.mail[0],
+                cn: attributes.cn,
+                userPassword: attributes.userPassword ? attributes.userPassword[0] : undefined,
+                isAdmin
+              });
+            })
+        );
       });
 
-      results.on('error', (err: Error) => {
-        this.logger.error(`Erreur lors de la recherche LDAP: ${err.message}`);
+      results.on('error', (err) => {
+        this.logger.error('Erreur lors de la recherche LDAP:', err);
         reject(err);
       });
 
-      results.on('end', () => {
-        this.logger.log(`Total des utilisateurs LDAP trouvés: ${entries.length}`);
-        this.logger.log('Utilisateurs valides:', JSON.stringify(entries, null, 2));
-        resolve(entries);
+      results.on('end', async () => {
+        try {
+          await Promise.all(promises);
+          this.logger.log(`Total des utilisateurs LDAP trouvés: ${entries.length}`);
+          this.logger.log(`Utilisateurs valides:`, entries);
+          resolve(entries);
+        } catch (error) {
+          reject(error);
+        }
       });
     });
   }
@@ -159,21 +199,36 @@ export class UserAdminController {
           // Vérifier si l'utilisateur existe déjà
           const existingUser = await this.userRepository.getByEmail(ldapUser.mail);
           if (existingUser) {
+            // Mettre à jour les droits d'administration si nécessaire
+            if (existingUser.isAdmin !== ldapUser.isAdmin) {
+              await this.userRepository.update(existingUser.id, {
+                isAdmin: ldapUser.isAdmin
+              });
+              this.logger.log(`Mise à jour des droits admin pour ${ldapUser.mail}: ${ldapUser.isAdmin}`);
+            }
             this.logger.log(`User ${ldapUser.mail} already exists, skipping`);
             skipped++;
             continue;
           }
 
-          // Créer l'utilisateur
-          const hashedPassword = await this.cryptoRepository.hashBcrypt(ldapUser.userPassword || 'changeme', SALT_ROUNDS);
+          // Utiliser le mot de passe LDAP
+          if (!ldapUser.userPassword) {
+            this.logger.warn(`Pas de mot de passe pour l'utilisateur ${ldapUser.mail}, ignoré`);
+            skipped++;
+            continue;
+          }
+
+          const hashedPassword = await this.cryptoRepository.hashBcrypt(ldapUser.userPassword, SALT_ROUNDS);
           const storageLabel = `user-${randomUUID()}`;
+
+          // Créer l'utilisateur
           await this.userRepository.create({
-            isAdmin: false,
+            isAdmin: ldapUser.isAdmin,
             email: ldapUser.mail,
             name: ldapUser.cn[0],
             password: hashedPassword,
             storageLabel,
-            shouldChangePassword: true, // Forcer le changement de mot de passe à la première connexion
+            shouldChangePassword: false, // Ne pas forcer le changement de mot de passe
           });
           created++;
           this.logger.log(`Created user account for ${ldapUser.mail}`);

@@ -290,6 +290,31 @@
         ]
       }
     },
+    "/admin/users/public-list": {
+      "get": {
+        "operationId": "getAllPublic",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserAdminResponseDto"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Liste tous les utilisateurs (Public)",
+        "tags": [
+          "Users (admin)"
+        ]
+      }
+    },
     "/admin/users/signup": {
       "post": {
         "operationId": "createAdmin",
