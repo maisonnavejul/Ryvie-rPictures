@@ -1,32 +1,24 @@
-#
-# WARNING: To install Immich, follow our guide: https://immich.app/docs/install/docker-compose
-#
-# Make sure to use the docker-compose.yml of the current release:
-#
-# https://github.com/immich-app/immich/releases/latest/download/docker-compose.yml
-#
-# The compose file on main may not be compatible with the latest release.
+version: '3.8'
 
 name: immich-prod
 
 services:
-immich-server:
-  container_name: immich_server
-  image: julescloud/rpictures-server:latest
-  volumes:
-    - ${UPLOAD_LOCATION}/photos:/usr/src/app/upload
-    - /etc/localtime:/etc/localtime:ro
-  env_file:
-    - .env
-  ports:
-    - 2283:2283
-  depends_on:
-    - redis
-    - database
-  restart: always
-  healthcheck:
-    disable: false
-
+  immich-server:
+    container_name: immich_server
+    image: julescloud/rpictures-server:v1.0.0
+    volumes:
+      - ${UPLOAD_LOCATION}/photos:/usr/src/app/upload
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - .env
+    ports:
+      - 2283:2283
+    depends_on:
+      - redis
+      - database
+    restart: always
+    healthcheck:
+      disable: false
 
   immich-machine-learning:
     container_name: immich_machine_learning
@@ -72,7 +64,6 @@ immich-server:
       postgres -c shared_preload_libraries=vectors.so -c 'search_path="$$user", public, vectors' -c logging_collector=on -c max_wal_size=2GB -c shared_buffers=512MB -c wal_compression=on
     restart: always
 
-  # set IMMICH_TELEMETRY_INCLUDE=all in .env to enable metrics
   immich-prometheus:
     container_name: immich_prometheus
     ports:
@@ -82,8 +73,6 @@ immich-server:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus-data:/prometheus
 
-  # first login uses admin/admin
-  # add data source for http://immich-prometheus:9090 to get started
   immich-grafana:
     container_name: immich_grafana
     command: [ './run.sh', '-disable-reporting' ]
