@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
+import 'package:immich_mobile/providers/auth.provider.dart';
 import 'package:immich_mobile/providers/connection_status.provider.dart';
 import 'package:logging/logging.dart';
 
@@ -17,7 +18,6 @@ class ServerHealthCheckNotifier {
   bool _isChecking = false;
   Timer? _retryTimer;
   bool _errorAlreadyShown = false;
-  String? _pendingRyvieId; // Stocke temporairement le nouveau ryvieId en attente de confirmation
 
   ServerHealthCheckNotifier(this._ref);
 
@@ -44,23 +44,41 @@ class ServerHealthCheckNotifier {
         _log.info('✅ RyvieId validé pour connexion locale');
       } catch (e) {
         _log.severe('❌ Erreur lors de la validation du ryvieId', e);
-        // Si le ryvieId ne correspond pas, extraire le nouveau ryvieId et le stocker
+        // Si le ryvieId ne correspond pas, basculer automatiquement sur le tunnel
         if (e.toString().contains('RYVIE_ID_MISMATCH:')) {
           final newRyvieId = e.toString().split('RYVIE_ID_MISMATCH:')[1];
-          _log.warning('⚠️  Nouveau RyvieId détecté: $newRyvieId');
+          _log.warning('⚠️  RyvieId différent détecté: $newRyvieId (attendu: $savedRyvieId)');
+          _log.info('🔄 Basculement automatique vers le tunnel...');
 
-          // Stocker le nouveau ryvieId temporairement pour le dialogue
-          _pendingRyvieId = newRyvieId;
+          // Basculer vers le tunnel automatiquement
+          try {
+            final authNotifier = _ref.read(authProvider.notifier);
+            final tunnelUrl = await authNotifier.setOpenApiServiceEndpoint(forceTunnel: true);
 
-          // Afficher un message d'erreur qui sera géré par l'UI
-          _ref
-              .read(connectionStatusProvider.notifier)
-              .setTunnelUnavailable(
-                '⚠️  Ryvie différent détecté !\n\n'
-                'L\'application est configurée pour un autre Ryvie.\n\n'
-                'Voulez-vous vous connecter à ce nouveau Ryvie ?',
-              );
-          return; // Ne pas continuer le health check
+            if (tunnelUrl != null) {
+              _log.info('✅ Basculement réussi vers le tunnel: $tunnelUrl');
+              _ref.read(connectionStatusProvider.notifier).setConnected(tunnelUrl);
+              return; // Health check terminé avec succès via tunnel
+            } else {
+              _log.severe('❌ Impossible de basculer vers le tunnel (pas d\'URL configurée)');
+              _ref
+                  .read(connectionStatusProvider.notifier)
+                  .setTunnelUnavailable(
+                    'Impossible de se connecter.\n\n'
+                    'Vous êtes sur un réseau avec un autre Ryvie et aucun tunnel n\'est configuré.',
+                  );
+              return;
+            }
+          } catch (tunnelError) {
+            _log.severe('❌ Erreur lors du basculement vers le tunnel', tunnelError);
+            _ref
+                .read(connectionStatusProvider.notifier)
+                .setTunnelUnavailable(
+                  'Impossible de se connecter via le tunnel.\n\n'
+                  'Vérifiez votre connexion Internet.',
+                );
+            return;
+          }
         }
       }
     }
@@ -87,28 +105,6 @@ class ServerHealthCheckNotifier {
       _retryTimer?.cancel();
       _retryTimer = null;
     }
-  }
-
-  /// Retourne le ryvieId en attente de confirmation (si un changement a été détecté)
-  String? get pendingRyvieId => _pendingRyvieId;
-
-  /// Accepte le nouveau ryvieId et relance le health check
-  Future<void> acceptNewRyvieId() async {
-    if (_pendingRyvieId != null) {
-      _log.info('✅ Acceptation du nouveau RyvieId: $_pendingRyvieId');
-      await Store.put(StoreKey.ryvieId, _pendingRyvieId!);
-      _pendingRyvieId = null;
-      _errorAlreadyShown = false;
-
-      // Relancer le health check
-      await performHealthCheck();
-    }
-  }
-
-  /// Rejette le nouveau ryvieId (l'utilisateur doit se déconnecter)
-  void rejectNewRyvieId() {
-    _log.warning('❌ Rejet du nouveau RyvieId');
-    _pendingRyvieId = null;
   }
 
   /// Vérifie la santé du serveur avec un timeout de 5 secondes

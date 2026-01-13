@@ -188,6 +188,13 @@ class AuthService {
     }
   }
 
+  /// Réinitialise uniquement le ryvieId pour permettre de changer de Ryvie
+  /// sans perdre les autres informations de connexion
+  Future<void> resetRyvieId() async {
+    _log.info('🔄 Réinitialisation du RyvieId pour changement de Ryvie');
+    await Store.delete(StoreKey.ryvieId);
+  }
+
   Future<String?> setOpenApiServiceEndpoint({bool forceTunnel = false}) async {
     // Toujours essayer la sélection intelligente d'URL en premier (ryvie.local:3013 en priorité)
     try {
