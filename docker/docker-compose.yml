@@ -12,7 +12,7 @@ name: rpictures
 services:
   rpictures-server:
     container_name: app-rpictures-server
-    image: julescloud/rpictures-server:v2.0.3
+    image: julescloud/rpictures-server:v2.0.4
     # extends:
     #   file: hwaccel.transcoding.yml
     #   service: cpu # set to one of [nvenc, quicksync, rkmpp, vaapi, vaapi-wsl] for accelerated transcoding
@@ -22,11 +22,14 @@ services:
       - /etc/localtime:/etc/localtime:ro
     env_file:
       - .env
+    environment:
+      - IMMICH_MACHINE_LEARNING_URL=http://rpictures-machine-learning:3003
     ports:
       - '3013:2283'
     depends_on:
       - redis
       - database
+      - rpictures-machine-learning
     restart: unless-stopped
     healthcheck:
       disable: false

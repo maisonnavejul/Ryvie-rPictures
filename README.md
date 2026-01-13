@@ -18,11 +18,11 @@
 
 ## Présentation
 
-**rPictures** est une application de sauvegarde, d’organisation et de consultation de photos/vidéos, pensée pour être **auto‑hébergée** sur votre propre serveur (chez vous ou sur un VPS), avec une expérience moderne proche de Google Photos, mais en gardant **le contrôle total sur vos données**.
+**rPictures** est une application de sauvegarde, d'organisation et de consultation de photos/vidéos, pensée pour être **auto‑hébergée** sur votre propre serveur (chez vous ou sur un VPS), avec une expérience moderne proche de Google Photos, mais en gardant **le contrôle total sur vos données**.
 
-rPictures est utilisé dans le cadre du projet **Ryvie**, un cloud personnel à la maison, et s’intègre dans cet écosystème pour fournir une brique « Photos/Vidéos » cohérente avec le reste des services (fichiers, notes, etc.).
+rPictures est développé spécifiquement pour **RyvieOS**, le système d'exploitation de cloud personnel à la maison. Il s'intègre nativement dans cet écosystème pour fournir une brique « Photos/Vidéos » cohérente avec le reste des services (fichiers, notes, etc.).
 
-rPictures est un **fork** du projet open source [Immich](https://github.com/immich-app/immich). Il reprend ses fondations techniques et fonctionnelles, tout en étant adapté et intégré à l’environnement Ryvie.
+rPictures est un **fork** du projet open source [Immich](https://github.com/immich-app/immich). Il reprend ses fondations techniques et fonctionnelles, tout en étant adapté et optimisé pour l'environnement RyvieOS.
 
 ---
 
@@ -37,8 +37,8 @@ rPictures est un **fork** du projet open source [Immich](https://github.com/immi
 - **Expérience moderne**  
   Interface moderne, recherche avancée, albums partagés, sauvegarde automatique depuis le mobile : une expérience proche des grandes plateformes, mais sans les inconvénients.
 
-- **Intégré à Ryvie**  
-  Conçu pour s’intégrer dans un **écosystème de cloud personnel** : authentification, supervision, sauvegardes et autres services peuvent être pilotés dans Ryvie.
+- **Conçu pour RyvieOS**  
+  Développé nativement pour **RyvieOS**, le système d'exploitation de cloud personnel : authentification LDAP intégrée, supervision, sauvegardes automatiques et gestion centralisée des services.
 
 - **Basé sur un projet mature**  
   Repose sur une base technique robuste issue du projet original Immich, bénéficiant de son expérience et de sa communauté.
@@ -47,10 +47,10 @@ rPictures est un **fork** du projet open source [Immich](https://github.com/immi
 
 ## Liens
 
-- **Code source** : https://github.com/maisonnavejul/rPictures  
-- **Site Ryvie (cloud personnel)** : https://ryvie.fr  
+- **Code source** : https://github.com/ryvieos/Ryvie-rPictures  
+- **Site RyvieOS** : https://ryvie.fr  
 - **Documentation** : à venir (se référer au dépôt GitHub)  
-- **Suivi des issues / demandes de fonctionnalités** : https://github.com/maisonnavejul/rPictures/issues  
+- **Suivi des issues / demandes de fonctionnalités** : https://github.com/ryvieos/Ryvie-rPictures/issues  
 - **Roadmap** : à venir  
 - **Démo** : voir la section ci‑dessous
 
@@ -138,13 +138,13 @@ Les détails précis de la stack et des services déployés sont décrits dans l
   - Une connexion réseau stable
   - Un espace disque suffisant pour stocker vos photos/vidéos
 - Un nom de domaine (optionnel mais recommandé) si vous exposez rPictures sur Internet
-- (Optionnel) Intégration avec Ryvie pour l’authentification, la supervision et les sauvegardes
+- **RyvieOS** (recommandé) pour une intégration complète avec l'authentification LDAP, la supervision et les sauvegardes automatiques
 
 ### Récupérer le code
 
 ```bash
-git clone https://github.com/maisonnavejul/rPictures.git
-cd rPictures
+git clone https://github.com/ryvieos/Ryvie-rPictures.git
+cd Ryvie-rPictures
 ```
 
 ### Déploiement rapide avec Docker Compose
@@ -213,9 +213,9 @@ Les contributions à rPictures sont les bienvenues !
   - La version de rPictures
   - Votre configuration (Docker, OS, etc.)
   - Les étapes pour reproduire le problème
-- **Proposer une nouvelle fonctionnalité** : créez une issue de type *feature request* en expliquant le besoin, le contexte (notamment avec Ryvie) et un exemple d’usage.
+- **Proposer une nouvelle fonctionnalité** : créez une issue de type *feature request* en expliquant le besoin, le contexte (notamment avec RyvieOS) et un exemple d'usage.
 - **Envoyer une Pull Request** :
-  - Forkez le dépôt : https://github.com/maisonnavejul/rPictures
+  - Forkez le dépôt : https://github.com/ryvieos/Ryvie-rPictures
   - Créez une branche dédiée
   - Ajoutez vos modifications avec des tests si possible
   - Ouvrez une PR en décrivant clairement votre changement
@@ -246,8 +246,8 @@ https://opensource.org/license/agpl-v3
 
 ## Auteurs & contributeurs
 
-<a href="https://github.com/maisonnavejul/rPictures/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=maisonnavejul/rPictures" width="100%" alt="Contributeurs de rPictures"/>
+<a href="https://github.com/ryvieos/Ryvie-rPictures/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=ryvieos/Ryvie-rPictures" width="100%" alt="Contributeurs de rPictures"/>
 </a>
 
-Merci à toutes les personnes qui participent à faire évoluer rPictures et à construire un cloud personnel respectueux de la vie privée avec Ryvie.
+Merci à toutes les personnes qui participent à faire évoluer rPictures et à construire un cloud personnel respectueux de la vie privée avec RyvieOS.

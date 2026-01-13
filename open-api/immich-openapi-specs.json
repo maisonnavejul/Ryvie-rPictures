@@ -5100,6 +5100,28 @@
         "x-immich-state": "Stable"
       }
     },
+    "/ldap/sync": {
+      "get": {
+        "description": "Synchronize users from LDAP directory to Immich database. This is a public endpoint.",
+        "operationId": "syncLdap",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Synchronize users from LDAP",
+        "tags": [
+          "LDAP Sync"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v1",
+            "state": "Added"
+          }
+        ]
+      }
+    },
     "/libraries": {
       "get": {
         "description": "Retrieve a list of external libraries.",
@@ -9396,6 +9418,44 @@
           }
         },
         "summary": "Ping",
+        "tags": [
+          "Server"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v1",
+            "state": "Added"
+          },
+          {
+            "version": "v1",
+            "state": "Beta"
+          },
+          {
+            "version": "v2",
+            "state": "Stable"
+          }
+        ],
+        "x-immich-state": "Stable"
+      }
+    },
+    "/server/ryvie-tunnel-info": {
+      "get": {
+        "description": "Retrieve tunnel configuration for intelligent URL selection. Returns tunnel host, public URL, and domain information.",
+        "operationId": "getRyvieTunnelInfo",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RyvieTunnelInfoDto"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Get Ryvie tunnel information",
         "tags": [
           "Server"
         ],
@@ -18433,6 +18493,46 @@
         "required": [
           "lastImportFileName",
           "lastUpdate"
+        ],
+        "type": "object"
+      },
+      "RyvieTunnelInfoDto": {
+        "properties": {
+          "domains": {
+            "properties": {
+              "api": {
+                "type": "string"
+              },
+              "app": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "publicUrl": {
+            "description": "Public URL for external access",
+            "type": "string"
+          },
+          "ryvieId": {
+            "description": "Unique Ryvie identifier",
+            "type": "string"
+          },
+          "setupKey": {
+            "description": "NetBird setup key",
+            "type": "string"
+          },
+          "success": {
+            "description": "Whether the request was successful",
+            "type": "boolean"
+          },
+          "tunnelHost": {
+            "description": "Tunnel host IP or hostname",
+            "type": "string"
+          }
+        },
+        "required": [
+          "success"
         ],
         "type": "object"
       },

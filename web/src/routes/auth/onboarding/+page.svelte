@@ -45,53 +45,11 @@
   const onboardingSteps: OnboardingStep[] = $derived([
     { name: 'hello', component: OnboardingHello, role: OnboardingRole.USER },
     {
-      name: 'theme',
-      component: OnboardingTheme,
-      role: OnboardingRole.USER,
-      title: $t('theme'),
-      icon: mdiThemeLightDark,
-    },
-    {
       name: 'language',
       component: OnboardingLocale,
       role: OnboardingRole.USER,
       title: $t('language'),
       icon: mdiTranslate,
-    },
-    {
-      name: 'server_privacy',
-      component: OnboardingServerPrivacy,
-      role: OnboardingRole.SERVER,
-      title: $t('server_privacy'),
-      icon: mdiIncognito,
-    },
-    {
-      name: 'user_privacy',
-      component: OnboardingUserPrivacy,
-      role: OnboardingRole.USER,
-      title: $t('user_privacy'),
-      icon: mdiIncognito,
-    },
-    {
-      name: 'storage_template',
-      component: OnboardingStorageTemplate,
-      role: OnboardingRole.SERVER,
-      title: $t('admin.storage_template_settings'),
-      icon: mdiHarddisk,
-    },
-    {
-      name: 'backup',
-      component: OnboardingBackup,
-      role: OnboardingRole.SERVER,
-      title: $t('admin.backup_onboarding_title'),
-      icon: mdiCloudCheckOutline,
-    },
-    {
-      name: 'mobile_app',
-      component: OnboardingMobileApp,
-      role: OnboardingRole.USER,
-      title: $t('mobile_app'),
-      icon: mdiCellphoneArrowDownVariant,
     },
   ]);
 

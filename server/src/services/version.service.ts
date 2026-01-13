@@ -84,8 +84,15 @@ export class VersionService extends BaseService {
         }
       }
 
-      const { tag_name: releaseVersion, published_at: publishedAt } =
-        await this.serverInfoRepository.getGitHubRelease();
+      const release = await this.serverInfoRepository.getGitHubRelease();
+      
+      // Si aucune release n'existe encore (404), on skip silencieusement
+      if (!release || !release.tag_name) {
+        this.logger.debug('No GitHub releases found yet');
+        return JobStatus.Skipped;
+      }
+
+      const { tag_name: releaseVersion, published_at: publishedAt } = release;
       const metadata: VersionCheckMetadata = { checkedAt: DateTime.utc().toISO(), releaseVersion };
 
       await this.systemMetadataRepository.set(SystemMetadataKey.VersionCheckState, metadata);
@@ -95,6 +102,11 @@ export class VersionService extends BaseService {
         this.websocketRepository.clientBroadcast('on_new_release', asNotification(metadata));
       }
     } catch (error: Error | any) {
+      // Si l'erreur est un 404 (pas de releases), on skip silencieusement
+      if (error.message?.includes('404')) {
+        this.logger.debug('No GitHub releases available yet');
+        return JobStatus.Skipped;
+      }
       this.logger.warn(`Unable to run version check: ${error}\n${error?.stack}`);
       return JobStatus.Failed;
     }

@@ -61,7 +61,7 @@ export class ServerInfoRepository {
 
   async getGitHubRelease(): Promise<GitHubRelease> {
     try {
-      const response = await fetch('https://api.github.com/repos/immich-app/immich/releases/latest');
+      const response = await fetch('https://api.github.com/repos/ryvieos/Ryvie-rPictures/releases/latest');
 
       if (!response.ok) {
         throw new Error(`GitHub API request failed with status ${response.status}: ${await response.text()}`);
