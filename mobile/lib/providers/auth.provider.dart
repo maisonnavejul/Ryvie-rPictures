@@ -188,12 +188,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
   }
 
   /// Sauvegarde les informations du tunnel pour la sélection intelligente d'URL
-  Future<void> saveTunnelInfo({String? tunnelHost, String? publicUrl}) async {
-    await _authService.saveTunnelInfo(tunnelHost: tunnelHost, publicUrl: publicUrl);
+  Future<void> saveTunnelInfo({String? ryvieId, String? tunnelHost, String? publicUrl}) async {
+    await _authService.saveTunnelInfo(ryvieId: ryvieId, tunnelHost: tunnelHost, publicUrl: publicUrl);
   }
 
   /// Récupère les informations du tunnel sauvegardées
-  ({String? tunnelHost, String? publicUrl}) getTunnelInfo() {
+  ({String? ryvieId, String? tunnelHost, String? publicUrl}) getTunnelInfo() {
     return _authService.getTunnelInfo();
   }
 
@@ -202,8 +202,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
     return Store.tryGet(StoreKey.serverEndpoint);
   }
 
-  Future<String?> setOpenApiServiceEndpoint() {
-    return _authService.setOpenApiServiceEndpoint();
+  Future<String?> setOpenApiServiceEndpoint({bool forceTunnel = false}) {
+    return _authService.setOpenApiServiceEndpoint(forceTunnel: forceTunnel);
   }
 
   Future<bool> unlockPinCode(String pinCode) {

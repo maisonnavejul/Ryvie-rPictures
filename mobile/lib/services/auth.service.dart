@@ -67,14 +67,15 @@ class AuthService {
 
   /// Sauvegarde les informations du tunnel pour la sélection intelligente d'URL
   ///
+  /// [ryvieId] - L'identifiant unique du Ryvie
   /// [tunnelHost] - L'adresse IP ou hostname du tunnel
   /// [publicUrl] - L'URL publique complète (optionnel)
-  Future<void> saveTunnelInfo({String? tunnelHost, String? publicUrl}) async {
-    await _smartUrlSelector.saveTunnelInfo(tunnelHost: tunnelHost, publicUrl: publicUrl);
+  Future<void> saveTunnelInfo({String? ryvieId, String? tunnelHost, String? publicUrl}) async {
+    await _smartUrlSelector.saveTunnelInfo(ryvieId: ryvieId, tunnelHost: tunnelHost, publicUrl: publicUrl);
   }
 
   /// Récupère les informations du tunnel sauvegardées
-  ({String? tunnelHost, String? publicUrl}) getTunnelInfo() {
+  ({String? ryvieId, String? tunnelHost, String? publicUrl}) getTunnelInfo() {
     return _smartUrlSelector.getSavedTunnelInfo();
   }
 
@@ -172,6 +173,7 @@ class AuthService {
       Store.delete(StoreKey.preferredWifiName),
       Store.delete(StoreKey.localEndpoint),
       Store.delete(StoreKey.externalEndpointList),
+      Store.delete(StoreKey.ryvieId),
       Store.delete(StoreKey.tunnelHost),
       Store.delete(StoreKey.publicUrl),
     ]);
@@ -186,10 +188,16 @@ class AuthService {
     }
   }
 
-  Future<String?> setOpenApiServiceEndpoint() async {
+  Future<String?> setOpenApiServiceEndpoint({bool forceTunnel = false}) async {
     // Toujours essayer la sélection intelligente d'URL en premier (ryvie.local:3013 en priorité)
     try {
-      final result = await _smartUrlSelector.selectServerUrl();
+      final result = forceTunnel
+          ? await _smartUrlSelector.selectTunnelUrl()
+          : await _smartUrlSelector.selectServerUrl();
+
+      if (result == null) {
+        throw Exception('NO_TUNNEL_CONFIG');
+      }
       _log.info('✅ Sélection intelligente URL: ${result.url} (local: ${result.isLocal})');
 
       if (result.url.isNotEmpty) {

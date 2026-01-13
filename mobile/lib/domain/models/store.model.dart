@@ -64,6 +64,7 @@ enum StoreKey<T> {
   externalEndpointList<String>._(135),
   tunnelHost<String>._(140),
   publicUrl<String>._(141),
+  ryvieId<String>._(142),
 
   // Video settings
   loadOriginalVideo<bool>._(136),

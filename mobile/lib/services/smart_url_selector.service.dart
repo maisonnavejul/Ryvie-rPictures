@@ -59,9 +59,13 @@ class SmartUrlSelectorService {
           final tunnelHost = data['tunnelHost'] as String?;
           final publicUrl = data['publicUrl'] as String?;
 
+          // Ne sauvegarder que tunnelHost et publicUrl, PAS le ryvieId
+          // Le ryvieId sera vérifié et sauvegardé par le ServerHealthCheck
           await saveTunnelInfo(tunnelHost: tunnelHost, publicUrl: publicUrl);
 
-          _log.info('✅ Informations du tunnel récupérées et sauvegardées automatiquement');
+          _log.info(
+            '✅ Informations du tunnel récupérées et sauvegardées automatiquement (tunnelHost: ${tunnelHost ?? "N/A"})',
+          );
         } else {
           _log.warning('⚠️  API retourne success=false');
         }
@@ -72,6 +76,35 @@ class SmartUrlSelectorService {
       client.close();
     } catch (e) {
       _log.warning('⚠️  Erreur lors de la récupération des infos tunnel: $e');
+    }
+  }
+
+  /// Force l'utilisation de l'URL tunnel/publique (ignore le local)
+  Future<({String url, bool isLocal})?> selectTunnelUrl() async {
+    _log.info('=== Forçage connexion TUNNEL ===');
+
+    // Récupérer l'URL publique sauvegardée
+    final publicUrl = Store.tryGet(StoreKey.publicUrl);
+    final tunnelHost = Store.tryGet(StoreKey.tunnelHost);
+
+    _log.info('📦 Infos sauvegardées - publicUrl: ${publicUrl ?? "VIDE"}, tunnelHost: ${tunnelHost ?? "VIDE"}');
+
+    String? urlToTry;
+
+    if (publicUrl != null && publicUrl.isNotEmpty) {
+      urlToTry = publicUrl;
+      _log.info('✅ URL publique trouvée: $urlToTry');
+    } else if (tunnelHost != null && tunnelHost.isNotEmpty) {
+      urlToTry = 'http://$tunnelHost:3013';
+      _log.info('✅ TunnelHost trouvé, construction URL: $urlToTry');
+    }
+
+    if (urlToTry != null) {
+      _log.info('✅ Utilisation forcée de l\'URL TUNNEL: $urlToTry');
+      return (url: urlToTry, isLocal: false);
+    } else {
+      _log.severe('⚠️  Aucune URL tunnel configurée');
+      return null;
     }
   }
 
@@ -128,8 +161,13 @@ class SmartUrlSelectorService {
   }
 
   /// Sauvegarde les informations de tunnel pour une utilisation future
-  Future<void> saveTunnelInfo({required String? tunnelHost, required String? publicUrl}) async {
+  Future<void> saveTunnelInfo({String? ryvieId, String? tunnelHost, String? publicUrl}) async {
     _log.info('Sauvegarde des informations de tunnel');
+
+    if (ryvieId != null && ryvieId.isNotEmpty) {
+      await Store.put(StoreKey.ryvieId, ryvieId);
+      _log.info('RyvieId sauvegardé: $ryvieId');
+    }
 
     if (tunnelHost != null && tunnelHost.isNotEmpty) {
       await Store.put(StoreKey.tunnelHost, tunnelHost);
@@ -143,16 +181,18 @@ class SmartUrlSelectorService {
   }
 
   /// Récupère les informations de tunnel sauvegardées
-  ({String? tunnelHost, String? publicUrl}) getSavedTunnelInfo() {
+  ({String? ryvieId, String? tunnelHost, String? publicUrl}) getSavedTunnelInfo() {
+    final ryvieId = Store.tryGet(StoreKey.ryvieId);
     final tunnelHost = Store.tryGet(StoreKey.tunnelHost);
     final publicUrl = Store.tryGet(StoreKey.publicUrl);
 
-    return (tunnelHost: tunnelHost, publicUrl: publicUrl);
+    return (ryvieId: ryvieId, tunnelHost: tunnelHost, publicUrl: publicUrl);
   }
 
   /// Efface les informations de tunnel sauvegardées
   Future<void> clearTunnelInfo() async {
     _log.info('Effacement des informations de tunnel');
+    await Store.delete(StoreKey.ryvieId);
     await Store.delete(StoreKey.tunnelHost);
     await Store.delete(StoreKey.publicUrl);
   }
