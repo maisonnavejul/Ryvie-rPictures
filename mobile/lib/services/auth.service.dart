@@ -151,17 +151,46 @@ class AuthService {
     }
   }
 
-  /// Clears all local authentication-related data.
+  /// Clears local authentication-related data (logout).
   ///
   /// This method performs a concurrent deletion of:
   /// - Authentication repository data
   /// - Current user information
   /// - Access token
   /// - Asset ETag
-  /// - Tunnel information
+  ///
+  /// ⚠️ IMPORTANT: Cette méthode GARDE les informations du tunnel (ryvieId, tunnelHost, publicUrl)
+  /// pour permettre une reconnexion facile. Pour supprimer TOUT (changement de Ryvie),
+  /// utilisez clearAllData() à la place.
   ///
   /// All deletions are executed in parallel using [Future.wait].
   Future<void> clearLocalData() async {
+    // Cancel any ongoing background sync operations before clearing data
+    await _backgroundSyncManager.cancel();
+    await Future.wait([
+      _authRepository.clearLocalData(),
+      Store.delete(StoreKey.currentUser),
+      Store.delete(StoreKey.accessToken),
+      Store.delete(StoreKey.assetETag),
+      Store.delete(StoreKey.autoEndpointSwitching),
+      Store.delete(StoreKey.preferredWifiName),
+      Store.delete(StoreKey.localEndpoint),
+      Store.delete(StoreKey.externalEndpointList),
+      // ⚠️ NE PAS SUPPRIMER: ryvieId, tunnelHost, publicUrl
+      // Ces infos sont conservées pour permettre une reconnexion facile
+    ]);
+  }
+
+  /// Efface TOUTES les données locales, y compris les informations du tunnel.
+  ///
+  /// Cette méthode est utilisée lors d'un changement de Ryvie (changement de serveur).
+  /// Elle supprime absolument tout pour repartir de zéro.
+  ///
+  /// Contrairement à clearLocalData(), cette méthode supprime aussi:
+  /// - ryvieId
+  /// - tunnelHost
+  /// - publicUrl
+  Future<void> clearAllData() async {
     // Cancel any ongoing background sync operations before clearing data
     await _backgroundSyncManager.cancel();
     await Future.wait([

@@ -81,14 +81,14 @@ class LoginForm extends HookConsumerWidget {
             onPressed: () async {
               Navigator.of(context).pop();
 
-              // Réinitialiser le ryvieId
-              await ref.read(authProvider.notifier).resetRyvieId();
+              // Effacer TOUTES les données (y compris ryvieId, tunnelHost, publicUrl)
+              await ref.read(authProvider.notifier).clearAllData();
 
               // Afficher un message de confirmation
               if (context.mounted) {
                 ImmichToast.show(
                   context: context,
-                  msg: 'RyvieId réinitialisé. Connectez-vous au WiFi de votre nouveau Ryvie.',
+                  msg: 'Toutes les données effacées. Connectez-vous au WiFi de votre nouveau Ryvie.',
                   toastType: ToastType.success,
                 );
               }

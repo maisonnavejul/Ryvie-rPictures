@@ -40,42 +40,80 @@ class SmartUrlSelectorService {
   }
 
   /// Récupère automatiquement les informations du tunnel depuis le serveur local
-  Future<void> fetchAndSaveTunnelInfo() async {
+  /// Nécessite un token JWT pour l'authentification
+  Future<void> fetchAndSaveTunnelInfo({String? accessToken}) async {
     try {
       _log.info('🔄 Récupération automatique des informations du tunnel...');
+
+      // Si pas de token fourni, essayer de le récupérer du Store
+      final token = accessToken ?? Store.tryGet(StoreKey.accessToken);
+
+      if (token == null || token.isEmpty) {
+        _log.warning('⚠️  Pas de token JWT disponible - impossible de récupérer les infos tunnel');
+        return;
+      }
+
+      _log.info('🔑 Token JWT trouvé - longueur: ${token.length} caractères');
 
       final uri = Uri.parse(localApiUrl);
       final client = HttpClient();
       client.connectionTimeout = connectionTimeout;
 
       final request = await client.getUrl(uri);
+
+      // Ajouter le header Authorization avec le token JWT
+      request.headers.set('Authorization', 'Bearer $token');
+      _log.info('📤 Envoi requête à: $localApiUrl avec Authorization header');
+
       final response = await request.close();
+
+      _log.info('📥 Réponse reçue - Status: ${response.statusCode}');
 
       if (response.statusCode == 200) {
         final responseBody = await response.transform(utf8.decoder).join();
+        _log.info('📦 Body de la réponse: $responseBody');
+
         final data = json.decode(responseBody) as Map<String, dynamic>;
 
         if (data['success'] == true) {
+          final ryvieId = data['ryvieId'] as String?;
           final tunnelHost = data['tunnelHost'] as String?;
           final publicUrl = data['publicUrl'] as String?;
+          final setupKey = data['setupKey'] as String?;
 
-          // Ne sauvegarder que tunnelHost et publicUrl, PAS le ryvieId
-          // Le ryvieId sera vérifié et sauvegardé par le ServerHealthCheck
-          await saveTunnelInfo(tunnelHost: tunnelHost, publicUrl: publicUrl);
+          _log.info('✅ Données parsées avec succès:');
+          _log.info('   📋 setupKey: ${setupKey ?? "N/A"}');
+          _log.info('   🆔 ryvieId: ${ryvieId ?? "N/A"}');
+          _log.info('   🌐 tunnelHost: ${tunnelHost ?? "N/A"}');
+          _log.info('   🔗 publicUrl: ${publicUrl ?? "N/A"}');
+
+          // Sauvegarder toutes les informations du tunnel
+          await saveTunnelInfo(ryvieId: ryvieId, tunnelHost: tunnelHost, publicUrl: publicUrl);
 
           _log.info(
-            '✅ Informations du tunnel récupérées et sauvegardées automatiquement (tunnelHost: ${tunnelHost ?? "N/A"})',
+            '✅ Informations du tunnel récupérées et sauvegardées automatiquement:\n'
+            '   - ryvieId: ${ryvieId ?? "N/A"}\n'
+            '   - tunnelHost: ${tunnelHost ?? "N/A"}\n'
+            '   - publicUrl: ${publicUrl ?? "N/A"}',
           );
         } else {
           _log.warning('⚠️  API retourne success=false');
+          _log.warning('   Réponse complète: $responseBody');
         }
+      } else if (response.statusCode == 401) {
+        _log.severe('❌ Erreur 401 Unauthorized - Token JWT invalide ou expiré');
+      } else if (response.statusCode == 403) {
+        _log.severe('❌ Erreur 403 Forbidden - Accès refusé');
       } else {
         _log.warning('⚠️  Échec récupération infos tunnel: HTTP ${response.statusCode}');
+        final responseBody = await response.transform(utf8.decoder).join();
+        _log.warning('   Réponse: $responseBody');
       }
 
       client.close();
-    } catch (e) {
+    } catch (e, stackTrace) {
       _log.warning('⚠️  Erreur lors de la récupération des infos tunnel: $e');
+      _log.warning('   Stack trace: $stackTrace');
     }
   }
 
@@ -121,6 +159,7 @@ class SmartUrlSelectorService {
       _log.info('✅ Connexion LOCALE réussie - Utilisation de $localServerUrl');
 
       // Récupérer automatiquement les informations du tunnel en arrière-plan
+      // Le token sera récupéré automatiquement du Store dans fetchAndSaveTunnelInfo
       fetchAndSaveTunnelInfo().catchError((e) {
         _log.warning('Erreur lors de la récupération auto des infos tunnel: $e');
       });
