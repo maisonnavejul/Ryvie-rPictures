@@ -11,6 +11,7 @@ import 'package:immich_mobile/providers/api.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/user.provider.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/auth.service.dart';
+import 'package:immich_mobile/services/ryvie_api.service.dart';
 import 'package:immich_mobile/services/secure_storage.service.dart';
 import 'package:immich_mobile/services/upload.service.dart';
 import 'package:immich_mobile/services/widget.service.dart';
@@ -78,13 +79,30 @@ class AuthNotifier extends StateNotifier<AuthState> {
   Future<LoginResponse> login(String email, String password) async {
     final response = await _authService.login(email, password);
     await saveAuthInfo(accessToken: response.accessToken);
+
+    // Après le login rPictures réussi, récupérer les infos tunnel via l'API Ryvie
+    _fetchTunnelInfoViaRyvieApi(email, password);
+
     return response;
   }
 
   Future<void> logout() async {
     try {
-      await _secureStorageService.delete(kSecuredPinCode);
-      await _widgetService.clearCredentials();
+      // Essayer de supprimer le code PIN du secure storage
+      // Sur le simulateur iOS, cela peut échouer avec l'erreur -34018
+      try {
+        await _secureStorageService.delete(kSecuredPinCode);
+      } catch (e) {
+        // Ignorer l'erreur du simulateur iOS (code -34018)
+        // L'erreur complète est: "L'un des droits requis n'est pas présent"
+        _log.warning('⚠️ Erreur lors de la suppression du PIN (probablement simulateur iOS): $e');
+      }
+
+      try {
+        await _widgetService.clearCredentials();
+      } catch (e) {
+        _log.warning('⚠️ Erreur lors de la suppression des credentials widget: $e');
+      }
 
       await _authService.logout();
       await _uploadService.cancelBackup();
@@ -171,6 +189,33 @@ class AuthNotifier extends StateNotifier<AuthState> {
     return true;
   }
 
+  /// Récupère les informations du tunnel via l'API Ryvie après un login réussi
+  /// Utilise les mêmes credentials (email/password) pour s'authentifier sur l'API Ryvie
+  void _fetchTunnelInfoViaRyvieApi(String email, String password) {
+    try {
+      _log.info('🔄 Lancement récupération infos tunnel via API Ryvie');
+
+      final ryvieApiService = RyvieApiService();
+      ryvieApiService
+          .authenticateAndFetchTunnelInfo(uid: email, password: password)
+          .then((tunnelInfo) {
+            if (tunnelInfo.ryvieId != null) {
+              _log.info('✅ Infos tunnel récupérées avec succès via API Ryvie');
+              _log.info('   🆔 RyvieId: ${tunnelInfo.ryvieId}');
+              _log.info('   🌐 TunnelHost: ${tunnelInfo.tunnelHost}');
+              _log.info('   🔗 PublicUrl: ${tunnelInfo.publicUrl}');
+            } else {
+              _log.warning('⚠️  Échec de la récupération des infos tunnel via API Ryvie');
+            }
+          })
+          .catchError((e) {
+            _log.warning('❌ Erreur lors de la récupération des infos tunnel via API Ryvie: $e');
+          });
+    } catch (e) {
+      _log.warning('❌ Erreur lors de l\'initialisation de la récupération des infos tunnel: $e');
+    }
+  }
+
   Future<void> saveWifiName(String wifiName) async {
     await Store.put(StoreKey.preferredWifiName, wifiName);
   }
@@ -188,12 +233,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
   }
 
   /// Sauvegarde les informations du tunnel pour la sélection intelligente d'URL
-  Future<void> saveTunnelInfo({String? tunnelHost, String? publicUrl}) async {
-    await _authService.saveTunnelInfo(tunnelHost: tunnelHost, publicUrl: publicUrl);
+  Future<void> saveTunnelInfo({String? ryvieId, String? tunnelHost, String? publicUrl}) async {
+    await _authService.saveTunnelInfo(ryvieId: ryvieId, tunnelHost: tunnelHost, publicUrl: publicUrl);
   }
 
   /// Récupère les informations du tunnel sauvegardées
-  ({String? tunnelHost, String? publicUrl}) getTunnelInfo() {
+  ({String? ryvieId, String? tunnelHost, String? publicUrl}) getTunnelInfo() {
     return _authService.getTunnelInfo();
   }
 
@@ -202,8 +247,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
     return Store.tryGet(StoreKey.serverEndpoint);
   }
 
-  Future<String?> setOpenApiServiceEndpoint() {
-    return _authService.setOpenApiServiceEndpoint();
+  Future<String?> setOpenApiServiceEndpoint({bool forceTunnel = false}) {
+    return _authService.setOpenApiServiceEndpoint(forceTunnel: forceTunnel);
   }
 
   Future<bool> unlockPinCode(String pinCode) {
@@ -216,5 +261,14 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
   Future<void> setupPinCode(String pinCode) {
     return _authService.setupPinCode(pinCode);
+  }
+
+  Future<void> resetRyvieId() {
+    return _authService.resetRyvieId();
+  }
+
+  /// Efface TOUTES les données pour un changement de Ryvie
+  Future<void> clearAllData() {
+    return _authService.clearAllData();
   }
 }

@@ -116,15 +116,19 @@ class ConnectionErrorBanner extends HookConsumerWidget {
 
     showDialog(
       context: context,
+      barrierDismissible: true,
       builder: (context) => AlertDialog(
         icon: Icon(icon, size: 48, color: iconColor),
         title: Text(
           title,
           textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
         ),
         content: SingleChildScrollView(
-          child: Text(state.errorMessage ?? 'Une erreur est survenue', style: const TextStyle(fontSize: 15)),
+          child: Text(
+            state.errorMessage ?? 'Une erreur est survenue',
+            style: const TextStyle(fontSize: 15, height: 1.4),
+          ),
         ),
         actions: [
           TextButton(

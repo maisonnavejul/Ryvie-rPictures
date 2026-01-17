@@ -2219,5 +2219,11 @@
   "public_url_helper": "URL publique complète pour accéder au serveur",
   "save_button": "Enregistrer",
   "tunnel_info_saved": "Informations du tunnel enregistrées avec succès",
-  "tunnel_info_save_error": "Erreur lors de l'enregistrement des informations du tunnel"
+  "tunnel_info_save_error": "Erreur lors de l'enregistrement des informations du tunnel",
+  "ryvie_id_mismatch_title": "Ryvie différent détecté",
+  "ryvie_id_mismatch_message": "L'application est actuellement configurée pour un autre serveur Ryvie.",
+  "ryvie_id_mismatch_details": "Vous êtes connecté à un Ryvie différent de celui configuré précédemment.",
+  "ryvie_id_mismatch_warning": "⚠️ Si vous acceptez, toutes vos données locales seront conservées mais liées à ce nouveau Ryvie.",
+  "ryvie_id_mismatch_accept": "Accepter et continuer",
+  "ryvie_id_mismatch_logout": "Se déconnecter"
 }

@@ -67,14 +67,15 @@ class AuthService {
 
   /// Sauvegarde les informations du tunnel pour la sélection intelligente d'URL
   ///
+  /// [ryvieId] - L'identifiant unique du Ryvie
   /// [tunnelHost] - L'adresse IP ou hostname du tunnel
   /// [publicUrl] - L'URL publique complète (optionnel)
-  Future<void> saveTunnelInfo({String? tunnelHost, String? publicUrl}) async {
-    await _smartUrlSelector.saveTunnelInfo(tunnelHost: tunnelHost, publicUrl: publicUrl);
+  Future<void> saveTunnelInfo({String? ryvieId, String? tunnelHost, String? publicUrl}) async {
+    await _smartUrlSelector.saveTunnelInfo(ryvieId: ryvieId, tunnelHost: tunnelHost, publicUrl: publicUrl);
   }
 
   /// Récupère les informations du tunnel sauvegardées
-  ({String? tunnelHost, String? publicUrl}) getTunnelInfo() {
+  ({String? ryvieId, String? tunnelHost, String? publicUrl}) getTunnelInfo() {
     return _smartUrlSelector.getSavedTunnelInfo();
   }
 
@@ -150,14 +151,17 @@ class AuthService {
     }
   }
 
-  /// Clears all local authentication-related data.
+  /// Clears local authentication-related data (logout).
   ///
   /// This method performs a concurrent deletion of:
   /// - Authentication repository data
   /// - Current user information
   /// - Access token
   /// - Asset ETag
-  /// - Tunnel information
+  ///
+  /// ⚠️ IMPORTANT: Cette méthode GARDE les informations du tunnel (ryvieId, tunnelHost, publicUrl)
+  /// pour permettre une reconnexion facile. Pour supprimer TOUT (changement de Ryvie),
+  /// utilisez clearAllData() à la place.
   ///
   /// All deletions are executed in parallel using [Future.wait].
   Future<void> clearLocalData() async {
@@ -172,6 +176,33 @@ class AuthService {
       Store.delete(StoreKey.preferredWifiName),
       Store.delete(StoreKey.localEndpoint),
       Store.delete(StoreKey.externalEndpointList),
+      // ⚠️ NE PAS SUPPRIMER: ryvieId, tunnelHost, publicUrl
+      // Ces infos sont conservées pour permettre une reconnexion facile
+    ]);
+  }
+
+  /// Efface TOUTES les données locales, y compris les informations du tunnel.
+  ///
+  /// Cette méthode est utilisée lors d'un changement de Ryvie (changement de serveur).
+  /// Elle supprime absolument tout pour repartir de zéro.
+  ///
+  /// Contrairement à clearLocalData(), cette méthode supprime aussi:
+  /// - ryvieId
+  /// - tunnelHost
+  /// - publicUrl
+  Future<void> clearAllData() async {
+    // Cancel any ongoing background sync operations before clearing data
+    await _backgroundSyncManager.cancel();
+    await Future.wait([
+      _authRepository.clearLocalData(),
+      Store.delete(StoreKey.currentUser),
+      Store.delete(StoreKey.accessToken),
+      Store.delete(StoreKey.assetETag),
+      Store.delete(StoreKey.autoEndpointSwitching),
+      Store.delete(StoreKey.preferredWifiName),
+      Store.delete(StoreKey.localEndpoint),
+      Store.delete(StoreKey.externalEndpointList),
+      Store.delete(StoreKey.ryvieId),
       Store.delete(StoreKey.tunnelHost),
       Store.delete(StoreKey.publicUrl),
     ]);
@@ -186,10 +217,23 @@ class AuthService {
     }
   }
 
-  Future<String?> setOpenApiServiceEndpoint() async {
+  /// Réinitialise uniquement le ryvieId pour permettre de changer de Ryvie
+  /// sans perdre les autres informations de connexion
+  Future<void> resetRyvieId() async {
+    _log.info('🔄 Réinitialisation du RyvieId pour changement de Ryvie');
+    await Store.delete(StoreKey.ryvieId);
+  }
+
+  Future<String?> setOpenApiServiceEndpoint({bool forceTunnel = false}) async {
     // Toujours essayer la sélection intelligente d'URL en premier (ryvie.local:3013 en priorité)
     try {
-      final result = await _smartUrlSelector.selectServerUrl();
+      final result = forceTunnel
+          ? await _smartUrlSelector.selectTunnelUrl()
+          : await _smartUrlSelector.selectServerUrl();
+
+      if (result == null) {
+        throw Exception('NO_TUNNEL_CONFIG');
+      }
       _log.info('✅ Sélection intelligente URL: ${result.url} (local: ${result.isLocal})');
 
       if (result.url.isNotEmpty) {

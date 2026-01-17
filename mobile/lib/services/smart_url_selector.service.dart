@@ -40,38 +40,109 @@ class SmartUrlSelectorService {
   }
 
   /// Récupère automatiquement les informations du tunnel depuis le serveur local
-  Future<void> fetchAndSaveTunnelInfo() async {
+  /// Nécessite un token JWT pour l'authentification
+  Future<void> fetchAndSaveTunnelInfo({String? accessToken}) async {
     try {
       _log.info('🔄 Récupération automatique des informations du tunnel...');
+
+      // Si pas de token fourni, essayer de le récupérer du Store
+      final token = accessToken ?? Store.tryGet(StoreKey.accessToken);
+
+      if (token == null || token.isEmpty) {
+        _log.warning('⚠️  Pas de token JWT disponible - impossible de récupérer les infos tunnel');
+        return;
+      }
+
+      _log.info('🔑 Token JWT trouvé - longueur: ${token.length} caractères');
 
       final uri = Uri.parse(localApiUrl);
       final client = HttpClient();
       client.connectionTimeout = connectionTimeout;
 
       final request = await client.getUrl(uri);
+
+      // Ajouter le header Authorization avec le token JWT
+      request.headers.set('Authorization', 'Bearer $token');
+      _log.info('📤 Envoi requête à: $localApiUrl avec Authorization header');
+
       final response = await request.close();
+
+      _log.info('📥 Réponse reçue - Status: ${response.statusCode}');
 
       if (response.statusCode == 200) {
         final responseBody = await response.transform(utf8.decoder).join();
+        _log.info('📦 Body de la réponse: $responseBody');
+
         final data = json.decode(responseBody) as Map<String, dynamic>;
 
         if (data['success'] == true) {
+          final ryvieId = data['ryvieId'] as String?;
           final tunnelHost = data['tunnelHost'] as String?;
           final publicUrl = data['publicUrl'] as String?;
+          final setupKey = data['setupKey'] as String?;
 
-          await saveTunnelInfo(tunnelHost: tunnelHost, publicUrl: publicUrl);
+          _log.info('✅ Données parsées avec succès:');
+          _log.info('   📋 setupKey: ${setupKey ?? "N/A"}');
+          _log.info('   🆔 ryvieId: ${ryvieId ?? "N/A"}');
+          _log.info('   🌐 tunnelHost: ${tunnelHost ?? "N/A"}');
+          _log.info('   🔗 publicUrl: ${publicUrl ?? "N/A"}');
 
-          _log.info('✅ Informations du tunnel récupérées et sauvegardées automatiquement');
+          // Sauvegarder toutes les informations du tunnel
+          await saveTunnelInfo(ryvieId: ryvieId, tunnelHost: tunnelHost, publicUrl: publicUrl);
+
+          _log.info(
+            '✅ Informations du tunnel récupérées et sauvegardées automatiquement:\n'
+            '   - ryvieId: ${ryvieId ?? "N/A"}\n'
+            '   - tunnelHost: ${tunnelHost ?? "N/A"}\n'
+            '   - publicUrl: ${publicUrl ?? "N/A"}',
+          );
         } else {
           _log.warning('⚠️  API retourne success=false');
+          _log.warning('   Réponse complète: $responseBody');
         }
+      } else if (response.statusCode == 401) {
+        _log.severe('❌ Erreur 401 Unauthorized - Token JWT invalide ou expiré');
+      } else if (response.statusCode == 403) {
+        _log.severe('❌ Erreur 403 Forbidden - Accès refusé');
       } else {
         _log.warning('⚠️  Échec récupération infos tunnel: HTTP ${response.statusCode}');
+        final responseBody = await response.transform(utf8.decoder).join();
+        _log.warning('   Réponse: $responseBody');
       }
 
       client.close();
-    } catch (e) {
+    } catch (e, stackTrace) {
       _log.warning('⚠️  Erreur lors de la récupération des infos tunnel: $e');
+      _log.warning('   Stack trace: $stackTrace');
+    }
+  }
+
+  /// Force l'utilisation de l'URL tunnel/publique (ignore le local)
+  Future<({String url, bool isLocal})?> selectTunnelUrl() async {
+    _log.info('=== Forçage connexion TUNNEL ===');
+
+    // Récupérer l'URL publique sauvegardée
+    final publicUrl = Store.tryGet(StoreKey.publicUrl);
+    final tunnelHost = Store.tryGet(StoreKey.tunnelHost);
+
+    _log.info('📦 Infos sauvegardées - publicUrl: ${publicUrl ?? "VIDE"}, tunnelHost: ${tunnelHost ?? "VIDE"}');
+
+    String? urlToTry;
+
+    if (publicUrl != null && publicUrl.isNotEmpty) {
+      urlToTry = publicUrl;
+      _log.info('✅ URL publique trouvée: $urlToTry');
+    } else if (tunnelHost != null && tunnelHost.isNotEmpty) {
+      urlToTry = 'http://$tunnelHost:3013';
+      _log.info('✅ TunnelHost trouvé, construction URL: $urlToTry');
+    }
+
+    if (urlToTry != null) {
+      _log.info('✅ Utilisation forcée de l\'URL TUNNEL: $urlToTry');
+      return (url: urlToTry, isLocal: false);
+    } else {
+      _log.severe('⚠️  Aucune URL tunnel configurée');
+      return null;
     }
   }
 
@@ -88,6 +159,7 @@ class SmartUrlSelectorService {
       _log.info('✅ Connexion LOCALE réussie - Utilisation de $localServerUrl');
 
       // Récupérer automatiquement les informations du tunnel en arrière-plan
+      // Le token sera récupéré automatiquement du Store dans fetchAndSaveTunnelInfo
       fetchAndSaveTunnelInfo().catchError((e) {
         _log.warning('Erreur lors de la récupération auto des infos tunnel: $e');
       });
@@ -128,8 +200,13 @@ class SmartUrlSelectorService {
   }
 
   /// Sauvegarde les informations de tunnel pour une utilisation future
-  Future<void> saveTunnelInfo({required String? tunnelHost, required String? publicUrl}) async {
+  Future<void> saveTunnelInfo({String? ryvieId, String? tunnelHost, String? publicUrl}) async {
     _log.info('Sauvegarde des informations de tunnel');
+
+    if (ryvieId != null && ryvieId.isNotEmpty) {
+      await Store.put(StoreKey.ryvieId, ryvieId);
+      _log.info('RyvieId sauvegardé: $ryvieId');
+    }
 
     if (tunnelHost != null && tunnelHost.isNotEmpty) {
       await Store.put(StoreKey.tunnelHost, tunnelHost);
@@ -143,16 +220,18 @@ class SmartUrlSelectorService {
   }
 
   /// Récupère les informations de tunnel sauvegardées
-  ({String? tunnelHost, String? publicUrl}) getSavedTunnelInfo() {
+  ({String? ryvieId, String? tunnelHost, String? publicUrl}) getSavedTunnelInfo() {
+    final ryvieId = Store.tryGet(StoreKey.ryvieId);
     final tunnelHost = Store.tryGet(StoreKey.tunnelHost);
     final publicUrl = Store.tryGet(StoreKey.publicUrl);
 
-    return (tunnelHost: tunnelHost, publicUrl: publicUrl);
+    return (ryvieId: ryvieId, tunnelHost: tunnelHost, publicUrl: publicUrl);
   }
 
   /// Efface les informations de tunnel sauvegardées
   Future<void> clearTunnelInfo() async {
     _log.info('Effacement des informations de tunnel');
+    await Store.delete(StoreKey.ryvieId);
     await Store.delete(StoreKey.tunnelHost);
     await Store.delete(StoreKey.publicUrl);
   }

@@ -102,8 +102,12 @@ final serverInfoProvider = StateNotifierProvider<ServerInfoNotifier, ServerInfo>
 });
 
 final versionWarningPresentProvider = Provider.family<bool, UserDto?>((ref, user) {
-  final serverInfo = ref.watch(serverInfoProvider);
-  return serverInfo.versionStatus == VersionStatus.clientOutOfDate ||
-      serverInfo.versionStatus == VersionStatus.error ||
-      ((user?.isAdmin ?? false) && serverInfo.versionStatus == VersionStatus.serverOutOfDate);
+  // Désactivé : ne jamais afficher la notification de mise à jour
+  return false;
+
+  // Code original (désactivé) :
+  // final serverInfo = ref.watch(serverInfoProvider);
+  // return serverInfo.versionStatus == VersionStatus.clientOutOfDate ||
+  //     serverInfo.versionStatus == VersionStatus.error ||
+  //     ((user?.isAdmin ?? false) && serverInfo.versionStatus == VersionStatus.serverOutOfDate);
 });

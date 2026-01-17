@@ -14,6 +14,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
+import 'package:immich_mobile/extensions/theme_extensions.dart';
 import 'package:immich_mobile/providers/auth.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup.provider.dart';
@@ -45,6 +46,59 @@ class LoginForm extends HookConsumerWidget {
   LoginForm({super.key});
 
   final log = Logger('LoginForm');
+
+  /// Affiche un dialogue d'avertissement avant de changer de Ryvie
+  void _showChangeRyvieDialog(BuildContext context, WidgetRef ref) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        icon: const Icon(Icons.warning_amber_rounded, size: 48, color: Colors.orange),
+        title: const Text(
+          'Changer de Ryvie',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+        ),
+        content: const SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Pour vous connecter à un nouveau Ryvie, vous devez être sur le même réseau WiFi que ce Ryvie.',
+                style: TextStyle(fontSize: 15, height: 1.4),
+              ),
+              SizedBox(height: 16),
+              Text(
+                '⚠️ Votre ancienne connexion sera perdue.',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.orange),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Annuler')),
+          FilledButton(
+            onPressed: () async {
+              Navigator.of(context).pop();
+
+              // Effacer TOUTES les données (y compris ryvieId, tunnelHost, publicUrl)
+              await ref.read(authProvider.notifier).clearAllData();
+
+              // Afficher un message de confirmation
+              if (context.mounted) {
+                ImmichToast.show(
+                  context: context,
+                  msg: 'Toutes les données effacées. Connectez-vous au WiFi de votre nouveau Ryvie.',
+                  toastType: ToastType.success,
+                );
+              }
+            },
+            child: const Text('Continuer'),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -517,6 +571,16 @@ class LoginForm extends HookConsumerWidget {
               icon: const Icon(Icons.arrow_back),
               onPressed: () => serverEndpoint.value = null,
               label: const Text('back').tr(),
+            ),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              icon: const Icon(Icons.swap_horiz, size: 18),
+              style: TextButton.styleFrom(foregroundColor: context.colorScheme.onSurfaceSecondary),
+              onPressed: () => _showChangeRyvieDialog(context, ref),
+              label: Text(
+                'Changer de Ryvie',
+                style: TextStyle(fontSize: 13, color: context.colorScheme.onSurfaceSecondary),
+              ),
             ),
           ],
         ),
