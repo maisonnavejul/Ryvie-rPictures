@@ -146,7 +146,7 @@ class BackupVerificationService {
         final latLng = await local.local!.latlngAsync();
 
         if (exif.latitude == null &&
-            latLng.latitude != null &&
+            latLng?.latitude != null &&
             (remote.fileCreatedAt.isAtSameMomentAs(local.fileCreatedAt) ||
                 remote.fileModifiedAt.isAtSameMomentAs(local.fileModifiedAt) ||
                 _sameExceptTimeZone(remote.fileCreatedAt, local.fileCreatedAt))) {

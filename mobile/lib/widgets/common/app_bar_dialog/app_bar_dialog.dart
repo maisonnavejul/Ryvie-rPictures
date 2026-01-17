@@ -58,11 +58,7 @@ class ImmichAppBarDialog extends HookConsumerWidget {
                 padding: const EdgeInsets.only(bottom: 4),
                 child: Text(
                   'rPictures',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: theme.textTheme.titleLarge?.color,
-                  ),
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: theme.textTheme.titleLarge?.color),
                 ),
               ),
             ),
@@ -118,13 +114,24 @@ class ImmichAppBarDialog extends HookConsumerWidget {
                   ok: "yes",
                   onOk: () async {
                     isLoggingOut.value = true;
-                    await ref.read(authProvider.notifier).logout().whenComplete(() => isLoggingOut.value = false);
 
-                    ref.read(manualUploadProvider.notifier).cancelBackup();
-                    ref.read(backupProvider.notifier).cancelBackup();
-                    unawaited(ref.read(assetProvider.notifier).clearAllAssets());
-                    ref.read(websocketProvider.notifier).disconnect();
-                    unawaited(context.replaceRoute(const LoginRoute()));
+                    try {
+                      await ref.read(authProvider.notifier).logout();
+
+                      ref.read(manualUploadProvider.notifier).cancelBackup();
+                      ref.read(backupProvider.notifier).cancelBackup();
+                      unawaited(ref.read(assetProvider.notifier).clearAllAssets());
+                      ref.read(websocketProvider.notifier).disconnect();
+                    } catch (e) {
+                      // Même en cas d'erreur, on continue la déconnexion
+                      print('⚠️ Erreur lors de la déconnexion: $e');
+                    } finally {
+                      isLoggingOut.value = false;
+                      // Toujours naviguer vers la page de login, même en cas d'erreur
+                      if (context.mounted) {
+                        unawaited(context.replaceRoute(const LoginRoute()));
+                      }
+                    }
                   },
                 );
               },
@@ -197,15 +204,10 @@ class ImmichAppBarDialog extends HookConsumerWidget {
             InkWell(
               onTap: () {
                 context.pop();
-                launchUrl(Uri.parse('https://immich.app'), mode: LaunchMode.externalApplication);
-              },
-              child: Text("documentation", style: context.textTheme.bodySmall).tr(),
-            ),
-            const SizedBox(width: 20, child: Text("•", textAlign: TextAlign.center)),
-            InkWell(
-              onTap: () {
-                context.pop();
-                launchUrl(Uri.parse('https://github.com/immich-app/immich'), mode: LaunchMode.externalApplication);
+                launchUrl(
+                  Uri.parse('https://github.com/ryvieos/Ryvie-rPictures'),
+                  mode: LaunchMode.externalApplication,
+                );
               },
               child: Text("profile_drawer_github", style: context.textTheme.bodySmall).tr(),
             ),

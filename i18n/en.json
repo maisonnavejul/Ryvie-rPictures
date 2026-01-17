@@ -2221,5 +2221,11 @@
   "public_url_helper": "Complete public URL to access the server",
   "save_button": "Save",
   "tunnel_info_saved": "Tunnel information saved successfully",
-  "tunnel_info_save_error": "Error saving tunnel information"
+  "tunnel_info_save_error": "Error saving tunnel information",
+  "ryvie_id_mismatch_title": "Different Ryvie Detected",
+  "ryvie_id_mismatch_message": "The app is currently configured for a different Ryvie server.",
+  "ryvie_id_mismatch_details": "You are connected to a different Ryvie than the one previously configured.",
+  "ryvie_id_mismatch_warning": "⚠️ If you accept, all your local data will be kept but linked to this new Ryvie.",
+  "ryvie_id_mismatch_accept": "Accept and Continue",
+  "ryvie_id_mismatch_logout": "Log Out"
 }
