@@ -18,11 +18,11 @@ echo ""
 # Aller dans le dossier ios
 cd ios
 
-echo "🔨 Build de l'application..."
+echo "🔨 Build de l'application avec xcodebuild..."
 echo "⏳ Cela peut prendre quelques minutes..."
 echo ""
 
-# Build avec xcodebuild
+# Build avec xcodebuild (la commande qui fonctionne)
 xcodebuild -workspace Runner.xcworkspace \
   -scheme Runner \
   -configuration Debug \
