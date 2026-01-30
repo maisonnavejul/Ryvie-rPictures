@@ -8,8 +8,11 @@ import * as ldap from 'ldapjs';
 import { promisify } from 'node:util';
 
 interface LdapUser {
+  uid: string;
   mail: string;
   cn: string[];
+  givenName?: string;
+  sn?: string;
   userPassword?: string;
   isAdmin: boolean;
 }
@@ -84,7 +87,6 @@ export class LdapSyncController {
       
       results.on('searchEntry', (entry: ldap.SearchEntry) => {
         const ldapUser = entry.pojo as any;
-        this.logger.log('Raw LDAP data:', JSON.stringify(ldapUser, null, 2));
         
         if (!ldapUser.objectName || !ldapUser.attributes) {
           this.logger.warn(`Invalid LDAP user - DN: ${ldapUser.objectName}`);
@@ -96,12 +98,15 @@ export class LdapSyncController {
           attributes[attr.type] = attr.values;
         }
 
+        const uidAttr = process.env.LDAP_UID_ATTRIBUTE || 'uid';
         const emailAttr = process.env.LDAP_EMAIL_ATTRIBUTE || 'mail';
         const nameAttr = process.env.LDAP_NAME_ATTRIBUTE || 'cn';
+        const givenNameAttr = process.env.LDAP_GIVEN_NAME_ATTRIBUTE || 'givenName';
+        const snAttr = process.env.LDAP_SN_ATTRIBUTE || 'sn';
         const passwordAttr = process.env.LDAP_PASSWORD_ATTRIBUTE || 'userPassword';
 
-        if (!attributes[emailAttr] || !attributes[nameAttr]) {
-          this.logger.warn(`LDAP user without email or cn - DN: ${ldapUser.objectName}`);
+        if (!attributes[uidAttr] || !attributes[emailAttr] || !attributes[nameAttr]) {
+          this.logger.warn(`LDAP user without uid, email or cn - DN: ${ldapUser.objectName}`);
           return;
         }
 
@@ -109,11 +114,15 @@ export class LdapSyncController {
         const promise = this.isUserInGroup(ldapUser.objectName, adminGroup)
           .then(isAdmin => {
             entries.push({
+              uid: attributes[uidAttr][0],
               mail: attributes[emailAttr][0],
               cn: attributes[nameAttr],
+              givenName: attributes[givenNameAttr] ? attributes[givenNameAttr][0] : undefined,
+              sn: attributes[snAttr] ? attributes[snAttr][0] : undefined,
               userPassword: attributes[passwordAttr] ? attributes[passwordAttr][0] : undefined,
               isAdmin
             });
+            this.logger.log(`🔍 LDAP user loaded: ${attributes[uidAttr][0]} (${attributes[emailAttr][0]})`);
           });
         promises.push(promise);
       });
@@ -127,7 +136,6 @@ export class LdapSyncController {
         void Promise.all(promises)
           .then(() => {
             this.logger.log(`Total LDAP users found: ${entries.length}`);
-            this.logger.log(`Valid users:`, entries);
             resolve(entries);
           })
           .catch((error) => {
@@ -144,75 +152,147 @@ export class LdapSyncController {
     history: new HistoryBuilder().added('v1'),
   })
   async syncLdap() {
-    this.logger.log('Starting LDAP users synchronization');
+    this.logger.log('🔄 Starting LDAP users synchronization');
     try {
       await this.bindLdap();
-      this.logger.log('LDAP connection established');
+      this.logger.log('✅ LDAP connection established');
       
       const ldapUsers = await this.getAllLdapUsers();
-      this.logger.log(`Starting synchronization for ${ldapUsers.length} users`);
+      this.logger.log(`📋 Found ${ldapUsers.length} users in LDAP`);
       
       let created = 0;
-      let skipped = 0;
       let updated = 0;
+      let deleted = 0;
+      let errors = 0;
 
+      // Build map of LDAP users by uid
+      const ldapUserMap = new Map<string, typeof ldapUsers[0]>();
+      for (const ldapUser of ldapUsers) {
+        ldapUserMap.set(ldapUser.uid, ldapUser);
+      }
+
+      // Get all existing users from database
+      const existingUsers = await this.userRepository.getList({ withDeleted: false });
+      const existingUsersByStorageLabel = new Map();
+      for (const user of existingUsers) {
+        if (user.storageLabel) {
+          existingUsersByStorageLabel.set(user.storageLabel, user);
+        }
+      }
+
+      // Process LDAP users (create or update)
       for (const ldapUser of ldapUsers) {
         try {
-          this.logger.log(`Processing LDAP user: ${ldapUser.mail}`);
-
           if (!ldapUser.userPassword) {
-            this.logger.warn(`No password for user ${ldapUser.mail}, skipped`);
-            skipped++;
+            this.logger.warn(`⚠️  No password for user ${ldapUser.uid} (${ldapUser.mail}), skipped`);
             continue;
           }
 
           const hashedPassword = await this.cryptoRepository.hashBcrypt(ldapUser.userPassword, 10);
-
-          const existingUser = await this.userRepository.getByEmail(ldapUser.mail);
-          if (existingUser) {
-            let needsUpdate = false;
-            const updates: any = {};
-
-            if (existingUser.isAdmin !== ldapUser.isAdmin) {
-              updates.isAdmin = ldapUser.isAdmin;
-              needsUpdate = true;
-            }
-
-            updates.password = hashedPassword;
-            needsUpdate = true;
-
-            if (needsUpdate) {
-              await this.userRepository.update(existingUser.id, updates);
-              this.logger.log(`Updated user ${ldapUser.mail}`);
-              updated++;
-            } else {
-              this.logger.log(`No update needed for ${ldapUser.mail}`);
-              skipped++;
-            }
-            continue;
+          
+          // Find user by storageLabel (uid) first, then by email for migration
+          let existingUser = existingUsersByStorageLabel.get(ldapUser.uid);
+          if (!existingUser) {
+            // Fallback: search by email for users not yet migrated to LDAP uid
+            existingUser = await this.userRepository.getByEmail(ldapUser.mail);
           }
 
-          const storageLabel = `user-${this.cryptoRepository.randomUUID()}`;
-          await this.userRepository.create({
-            isAdmin: ldapUser.isAdmin,
-            email: ldapUser.mail,
-            name: ldapUser.cn[0],
-            password: hashedPassword,
-            storageLabel,
-            shouldChangePassword: false,
-          });
-          created++;
-          this.logger.log(`Created user account for ${ldapUser.mail}`);
+          if (existingUser) {
+            // Update existing user
+            const updates: any = {};
+            let hasChanges = false;
+
+            // Migrate storageLabel if needed (for existing users without LDAP uid)
+            if (existingUser.storageLabel !== ldapUser.uid) {
+              updates.storageLabel = ldapUser.uid;
+              hasChanges = true;
+              this.logger.log(`🔄 StorageLabel migrated: ${existingUser.storageLabel || 'null'} → ${ldapUser.uid}`);
+            }
+
+            // Check email change
+            if (existingUser.email !== ldapUser.mail) {
+              updates.email = ldapUser.mail;
+              hasChanges = true;
+              this.logger.log(`📧 Email updated: ${ldapUser.uid} (${existingUser.email} → ${ldapUser.mail})`);
+            }
+
+            // Check admin status change - sync with LDAP group membership
+            if (existingUser.isAdmin !== ldapUser.isAdmin) {
+              updates.isAdmin = ldapUser.isAdmin;
+              hasChanges = true;
+              if (ldapUser.isAdmin) {
+                this.logger.log(`👑 Admin promoted: ${ldapUser.uid}`);
+              } else {
+                this.logger.log(`👤 Admin demoted: ${ldapUser.uid}`);
+              }
+            }
+
+            // Check name change
+            const firstName = ldapUser.givenName || ldapUser.uid;
+            const lastName = ldapUser.sn && ldapUser.sn !== firstName ? ldapUser.sn : '';
+            const fullName = lastName ? `${firstName} ${lastName}` : firstName;
+            
+            if (existingUser.name !== fullName) {
+              updates.name = fullName;
+              hasChanges = true;
+            }
+
+            // Always update password
+            updates.password = hashedPassword;
+            hasChanges = true;
+
+            if (hasChanges) {
+              await this.userRepository.update(existingUser.id, updates);
+              updated++;
+            }
+          } else {
+            // Create new user
+            const firstName = ldapUser.givenName || ldapUser.uid;
+            const lastName = ldapUser.sn && ldapUser.sn !== firstName ? ldapUser.sn : '';
+            const fullName = lastName ? `${firstName} ${lastName}` : firstName;
+
+            await this.userRepository.create({
+              isAdmin: ldapUser.isAdmin,
+              email: ldapUser.mail,
+              name: fullName,
+              password: hashedPassword,
+              storageLabel: ldapUser.uid,
+              shouldChangePassword: false,
+            });
+            created++;
+            this.logger.log(`🆕 Creating: ${ldapUser.uid} (${ldapUser.mail})`);
+          }
         } catch (error) {
-          this.logger.error(`Error processing user ${ldapUser.mail}:`, error);
+          errors++;
+          this.logger.error(`❌ Error processing user ${ldapUser.uid}:`, error);
         }
       }
 
-      this.logger.log(`LDAP synchronization completed. Created: ${created}, Updated: ${updated}, Skipped: ${skipped}`);
-      return { created, updated, skipped };
+      // Delete users not in LDAP anymore
+      // Only delete users with LDAP uid in storageLabel (not random UUIDs or null)
+      for (const [storageLabel, user] of existingUsersByStorageLabel) {
+        // Skip users with UUID-style storageLabel (not from LDAP)
+        if (storageLabel.startsWith('user-') || !storageLabel) {
+          continue;
+        }
+        
+        if (!ldapUserMap.has(storageLabel)) {
+          try {
+            await this.userRepository.delete({ id: user.id }, false);
+            deleted++;
+            this.logger.log(`🗑️  Deleting: ${storageLabel} (${user.email})`);
+          } catch (error) {
+            errors++;
+            this.logger.error(`❌ Error deleting user ${storageLabel}:`, error);
+          }
+        }
+      }
+
+      this.logger.log(`📊 Sync Summary: 🆕 ${created} created | 🔄 ${updated} updated | 🗑️ ${deleted} deleted | ❌ ${errors} errors`);
+      return { created, updated, deleted, errors };
     } catch (error_) {
       const error = error_ as Error;
-      this.logger.error(`LDAP synchronization failed: ${error.message}`);
+      this.logger.error(`❌ LDAP synchronization failed: ${error.message}`);
       throw error;
     }
   }

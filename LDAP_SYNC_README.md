@@ -1,8 +1,16 @@
-# Synchronisation LDAP pour Immich
+# Synchronisation LDAP pour rPictures
 
-## Description
+## 📋 Vue d'ensemble
 
-Ce module permet de synchroniser automatiquement les utilisateurs depuis un serveur LDAP vers la base de données Immich. Il a été créé en s'inspirant de l'implémentation dans rPictures.
+La synchronisation LDAP permet de maintenir automatiquement les utilisateurs de rPictures en phase avec votre serveur LDAP (Ryvie Manager). Cette synchronisation est **unidirectionnelle** : LDAP → rPictures.
+
+### Fonctionnalités
+
+- ✅ **Création automatique** des nouveaux utilisateurs LDAP dans rPictures
+- ✅ **Mise à jour** des informations utilisateur (email, nom, statut admin)
+- ✅ **Suppression automatique** des utilisateurs retirés de LDAP
+- ✅ **Préservation des données** lors du changement d'email (grâce au tracking par UID)
+- ✅ **Logs minimalistes** et résumé clair des opérations
 
 ## Configuration
 
@@ -18,8 +26,11 @@ Les variables d'environnement suivantes doivent être configurées pour utiliser
 ### Variables optionnelles
 
 - `LDAP_USER_FILTER` : Filtre LDAP pour les utilisateurs (par défaut: `(objectClass=inetOrgPerson)`)
+- `LDAP_UID_ATTRIBUTE` : Attribut LDAP pour l'identifiant unique (par défaut: `uid`)
 - `LDAP_EMAIL_ATTRIBUTE` : Attribut LDAP pour l'email (par défaut: `mail`)
 - `LDAP_NAME_ATTRIBUTE` : Attribut LDAP pour le nom (par défaut: `cn`)
+- `LDAP_GIVEN_NAME_ATTRIBUTE` : Attribut LDAP pour le prénom (par défaut: `givenName`)
+- `LDAP_SN_ATTRIBUTE` : Attribut LDAP pour le nom de famille (par défaut: `sn`)
 - `LDAP_PASSWORD_ATTRIBUTE` : Attribut LDAP pour le mot de passe (par défaut: `userPassword`)
 - `LDAP_ADMIN_GROUP` : Nom du groupe LDAP pour les administrateurs (par défaut: `admins`)
 
@@ -34,8 +45,11 @@ services:
       - LDAP_BIND_PASSWORD=adminpassword
       - LDAP_USER_BASE_DN=ou=users,dc=example,dc=org
       - LDAP_USER_FILTER=(objectClass=inetOrgPerson)
+      - LDAP_UID_ATTRIBUTE=uid
       - LDAP_EMAIL_ATTRIBUTE=mail
       - LDAP_NAME_ATTRIBUTE=cn
+      - LDAP_GIVEN_NAME_ATTRIBUTE=givenName
+      - LDAP_SN_ATTRIBUTE=sn
       - LDAP_PASSWORD_ATTRIBUTE=userPassword
       - LDAP_ADMIN_GROUP=admins
 ```
@@ -66,46 +80,199 @@ L'endpoint retourne un objet JSON avec les statistiques de synchronisation :
 {
   "created": 5,
   "updated": 2,
-  "skipped": 3
+  "deleted": 1,
+  "errors": 0
 }
 ```
 
 - `created` : Nombre d'utilisateurs créés
 - `updated` : Nombre d'utilisateurs mis à jour
-- `skipped` : Nombre d'utilisateurs ignorés (pas de mot de passe ou aucune modification nécessaire)
+- `deleted` : Nombre d'utilisateurs supprimés (absents de LDAP)
+- `errors` : Nombre d'erreurs rencontrées
 
-## Fonctionnement
+## 🚀 Fonctionnement détaillé
 
-1. **Connexion LDAP** : Le module se connecte au serveur LDAP avec les credentials fournis
-2. **Recherche des utilisateurs** : Récupère tous les utilisateurs correspondant au filtre LDAP
-3. **Vérification des groupes** : Pour chaque utilisateur, vérifie s'il appartient au groupe admin
-4. **Synchronisation** :
-   - Si l'utilisateur existe déjà : met à jour son mot de passe et son statut admin si nécessaire
-   - Si l'utilisateur n'existe pas : crée un nouveau compte avec les informations LDAP
-   - Si l'utilisateur n'a pas de mot de passe : ignore l'utilisateur
+### Identifiant unique
 
-## Logs
+Le script utilise le champ **`uid`** LDAP comme identifiant unique et immuable :
+- Stocké dans `storageLabel` dans rPictures
+- Permet de suivre un utilisateur même si son email change
+- **Ne jamais modifier le `uid` d'un utilisateur existant**
 
-Le module génère des logs détaillés pour suivre le processus de synchronisation :
+### 1. Création d'utilisateur
 
-- Connexion LDAP établie
-- Nombre d'utilisateurs trouvés
-- Traitement de chaque utilisateur
-- Résumé de la synchronisation (créés, mis à jour, ignorés)
-- Erreurs éventuelles
+Quand un nouvel utilisateur est détecté dans LDAP :
 
-## Sécurité
+1. **Création du compte rPictures**
+   - `storageLabel` = `uid` LDAP (identifiant unique)
+   - `email` = email LDAP
+   - `name` = `givenName sn` ou `uid` si absent
+   - `isAdmin` = basé sur l'appartenance au groupe admin
 
-⚠️ **Important** : 
+**Log affiché :**
+```
+🆕 Creating: uid (email@example.com)
+```
 
-- Les mots de passe LDAP sont hashés avec bcrypt (10 rounds) avant d'être stockés
-- L'endpoint de synchronisation est public par défaut - protégez-le au niveau du reverse proxy
-- Assurez-vous que les credentials LDAP sont stockés de manière sécurisée
-- Utilisez LDAPS (LDAP over SSL) en production
+### 2. Mise à jour d'utilisateur
 
-## Dépendances
+Le script détecte et met à jour automatiquement :
+
+#### Email modifié
+```
+📧 Email updated: uid (old@email.com → new@email.com)
+```
+**Important :** Les données utilisateur (photos, albums) sont **préservées** car l'identification se fait par `uid`, pas par email.
+
+#### Nom/Prénom modifié
+Mise à jour silencieuse (pas de log sauf erreur).
+
+#### Statut admin modifié
+Mise à jour silencieuse basée sur l'appartenance au groupe LDAP.
+
+### 3. Suppression d'utilisateur
+
+Quand un utilisateur n'existe plus dans LDAP :
+
+1. **Détection** : Le `uid` n'est plus présent dans LDAP
+2. **Suppression douce** : 
+   - `deletedAt` → date actuelle
+   - L'utilisateur est marqué comme supprimé mais les données sont préservées
+
+**Log affiché :**
+```
+🗑️  Deleting: uid (email@example.com)
+```
+
+## 📈 Résumé de synchronisation
+
+À la fin de chaque exécution, le script affiche un résumé compact :
+
+```
+📊 Sync Summary: 🆕 2 created | 🔄 3 updated | 🗑️ 1 deleted | ❌ 0 errors
+```
+
+- **🆕 Created** : Nouveaux utilisateurs ajoutés
+- **🔄 Updated** : Utilisateurs mis à jour (email, nom, etc.)
+- **🗑️ Deleted** : Utilisateurs supprimés (absents de LDAP)
+- **❌ Errors** : Erreurs rencontrées
+
+## 📝 Logs détaillés
+
+Le module génère des logs avec emojis pour faciliter la lecture :
+
+- 🔄 Démarrage de la synchronisation
+- ✅ Connexion LDAP établie
+- 📋 Nombre d'utilisateurs trouvés
+- 🆕 Création d'utilisateur
+- 📧 Changement d'email
+- 🗑️ Suppression d'utilisateur
+- ⚠️ Avertissements (utilisateur sans mot de passe)
+- ❌ Erreurs
+- 📊 Résumé final
+
+## ⚠️ Limitations et précautions
+
+### Limitations actuelles
+
+1. **Synchronisation unidirectionnelle** : LDAP → rPictures uniquement
+   - Les modifications dans rPictures ne sont PAS synchronisées vers LDAP
+   - Gérer les utilisateurs via Ryvie Manager (interface LDAP)
+
+2. **Suppression douce uniquement**
+   - Les utilisateurs sont marqués comme supprimés (`deletedAt`)
+   - Les données (photos, albums) sont préservées
+   - Pas de suppression définitive automatique
+
+### Précautions importantes
+
+⚠️ **Ne jamais modifier le `uid` LDAP** d'un utilisateur existant
+- Le script le considérera comme un nouvel utilisateur
+- L'ancien compte sera marqué comme supprimé
+
+⚠️ **Sauvegardes régulières**
+- Avant toute synchronisation massive
+- Avant modification de la structure LDAP
+
+⚠️ **Tester en environnement de développement**
+- Valider les modifications du script avant production
+- Vérifier les logs après chaque synchronisation
+
+## 🔐 Sécurité
+
+### Bonnes pratiques
+
+1. **Mot de passe LDAP sécurisé**
+   - Utiliser Docker secrets ou variables d'environnement sécurisées
+   - Ne jamais commiter les credentials dans le code
+
+2. **Connexion LDAP chiffrée** (recommandé)
+   ```yaml
+   LDAP_URL: "ldaps://openldap:636"
+   ```
+
+3. **Permissions restreintes**
+   - Le compte LDAP de synchronisation doit avoir accès en lecture seule
+   - Pas besoin de droits d'écriture sur LDAP
+
+4. **Protection de l'endpoint**
+   - L'endpoint `/api/ldap/sync` est public par défaut
+   - Protégez-le au niveau du reverse proxy ou ajoutez une authentification
+
+5. **Hashage des mots de passe**
+   - Les mots de passe LDAP sont hashés avec bcrypt (10 rounds)
+   - Les mots de passe ne sont jamais loggés
+
+## 🛠️ Automatisation
+
+### Cron job
+
+Ajoutez dans votre `crontab` :
+
+```bash
+# Synchronisation toutes les heures
+0 * * * * curl -X GET http://localhost:2283/api/ldap/sync >> /var/log/rpictures-ldap-sync.log 2>&1
+```
+
+### Systemd timer
+
+```ini
+# /etc/systemd/system/rpictures-ldap-sync.timer
+[Unit]
+Description=rPictures LDAP Sync Timer
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```ini
+# /etc/systemd/system/rpictures-ldap-sync.service
+[Unit]
+Description=rPictures LDAP Synchronization
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/curl -X GET http://localhost:2283/api/ldap/sync
+```
+
+Activation :
+```bash
+sudo systemctl enable rpictures-ldap-sync.timer
+sudo systemctl start rpictures-ldap-sync.timer
+```
+
+## 📚 Dépendances
 
 - `ldapjs` : Client LDAP pour Node.js
 - `@types/ldapjs` : Types TypeScript pour ldapjs
 
 Ces dépendances ont été installées automatiquement lors de la création du module.
+
+---
+
+*Dernière mise à jour : 29 janvier 2026*
+*Inspiré de l'implémentation rDrive*
