@@ -247,8 +247,18 @@ export class AuthService extends BaseService {
       throw new BadRequestException('OAuth is not enabled');
     }
 
+    // Construire l'issuerUrl dynamiquement en fonction de l'origine
+    const dynamicOauth = { ...oauth };
+    try {
+      const redirectUrl = new URL(dto.redirectUri);
+      dynamicOauth.issuerUrl = `http://${redirectUrl.hostname}:8080/realms/ryvie`;
+    } catch (error) {
+      // Si l'URL est invalide, utiliser l'issuerUrl par défaut
+      this.logger.warn(`Invalid redirectUri, using default issuerUrl: ${error}`);
+    }
+
     return await this.oauthRepository.authorize(
-      oauth,
+      dynamicOauth,
       this.resolveRedirectUri(oauth, dto.redirectUri),
       dto.state,
       dto.codeChallenge,
@@ -268,7 +278,18 @@ export class AuthService extends BaseService {
 
     const { oauth } = await this.getConfig({ withCache: false });
     const url = this.resolveRedirectUri(oauth, dto.url);
-    const profile = await this.oauthRepository.getProfile(oauth, url, expectedState, codeVerifier);
+    
+    // Construire l'issuerUrl dynamiquement en fonction de l'URL de callback
+    const dynamicOauth = { ...oauth };
+    try {
+      const callbackUrl = new URL(url);
+      dynamicOauth.issuerUrl = `http://${callbackUrl.hostname}:8080/realms/ryvie`;
+    } catch (error) {
+      // Si l'URL est invalide, utiliser l'issuerUrl par défaut
+      this.logger.warn(`Invalid callback URL, using default issuerUrl: ${error}`);
+    }
+    
+    const profile = await this.oauthRepository.getProfile(dynamicOauth, url, expectedState, codeVerifier);
     const { autoRegister, defaultStorageQuota, storageLabelClaim, storageQuotaClaim, roleClaim } = oauth;
     this.logger.debug(`Logging in with OAuth: ${JSON.stringify(profile)}`);
     let user: UserAdmin | undefined = await this.userRepository.getByOAuthId(profile.sub);
