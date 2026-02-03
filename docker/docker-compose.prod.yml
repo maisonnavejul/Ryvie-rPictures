@@ -26,6 +26,9 @@ services:
       - .env
     ports:
       - 3013:2283
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "ryvie.local:host-gateway"
     depends_on:
       - redis
       - database
