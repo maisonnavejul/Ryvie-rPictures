@@ -286,7 +286,7 @@ export const defaults = Object.freeze<SystemConfig>({
     },
   },
   oauth: {
-    autoLaunch: false,
+    autoLaunch: true,
     autoRegister: true,
     buttonText: process.env.OAUTH_BUTTON_TEXT || 'Se connecter avec Ryvie',
     clientId: process.env.OAUTH_CLIENT_ID || 'ryvie-rpictures',
