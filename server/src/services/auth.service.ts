@@ -80,7 +80,7 @@ export class AuthService extends BaseService {
     return this.createLoginResponse(user, details);
   }
 
-  async logout(auth: AuthDto, authType: AuthType): Promise<LogoutResponseDto> {
+  async logout(auth: AuthDto, authType: AuthType, request?: any): Promise<LogoutResponseDto> {
     if (auth.session) {
       await this.sessionRepository.delete(auth.session.id);
       await this.eventRepository.emit('SessionDelete', { sessionId: auth.session.id });
@@ -88,7 +88,7 @@ export class AuthService extends BaseService {
 
     return {
       successful: true,
-      redirectUri: await this.getLogoutEndpoint(authType),
+      redirectUri: await this.getLogoutEndpoint(authType, request),
     };
   }
 
@@ -405,7 +405,7 @@ export class AuthService extends BaseService {
     return mapUserAdmin(user);
   }
 
-  private async getLogoutEndpoint(authType: AuthType): Promise<string> {
+  private async getLogoutEndpoint(authType: AuthType, request?: any): Promise<string> {
     if (authType !== AuthType.OAuth) {
       return LOGIN_URL;
     }
@@ -415,7 +415,21 @@ export class AuthService extends BaseService {
       return LOGIN_URL;
     }
 
-    return (await this.oauthRepository.getLogoutEndpoint(config.oauth)) || LOGIN_URL;
+    // Construire l'issuerUrl dynamiquement en fonction du hostname de la requête
+    const dynamicOauth = { ...config.oauth };
+    if (request) {
+      try {
+        const hostname = request.hostname || request.headers?.host?.split(':')[0];
+        if (hostname) {
+          dynamicOauth.issuerUrl = `http://${hostname}:3005/realms/ryvie`;
+          this.logger.debug(`Using dynamic issuerUrl for logout: ${dynamicOauth.issuerUrl}`);
+        }
+      } catch (error) {
+        this.logger.warn(`Failed to extract hostname from request, using default issuerUrl: ${error}`);
+      }
+    }
+
+    return (await this.oauthRepository.getLogoutEndpoint(dynamicOauth)) || LOGIN_URL;
   }
 
   private getBearerToken(headers: IncomingHttpHeaders): string | null {
