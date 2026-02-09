@@ -253,7 +253,6 @@ export class AuthService extends BaseService {
       const redirectUrl = new URL(dto.redirectUri);
       dynamicOauth.issuerUrl = `http://${redirectUrl.hostname}:3005/realms/ryvie`;
     } catch (error) {
-      // Si l'URL est invalide, utiliser l'issuerUrl par défaut
       this.logger.warn(`Invalid redirectUri, using default issuerUrl: ${error}`);
     }
 
@@ -285,7 +284,6 @@ export class AuthService extends BaseService {
       const callbackUrl = new URL(url);
       dynamicOauth.issuerUrl = `http://${callbackUrl.hostname}:3005/realms/ryvie`;
     } catch (error) {
-      // Si l'URL est invalide, utiliser l'issuerUrl par défaut
       this.logger.warn(`Invalid callback URL, using default issuerUrl: ${error}`);
     }
     
@@ -422,7 +420,6 @@ export class AuthService extends BaseService {
         const hostname = request.hostname || request.headers?.host?.split(':')[0];
         if (hostname) {
           dynamicOauth.issuerUrl = `http://${hostname}:3005/realms/ryvie`;
-          this.logger.debug(`Using dynamic issuerUrl for logout: ${dynamicOauth.issuerUrl}`);
         }
       } catch (error) {
         this.logger.warn(`Failed to extract hostname from request, using default issuerUrl: ${error}`);
