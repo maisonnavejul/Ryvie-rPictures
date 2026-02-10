@@ -404,29 +404,8 @@ export class AuthService extends BaseService {
   }
 
   private async getLogoutEndpoint(authType: AuthType, request?: any): Promise<string> {
-    if (authType !== AuthType.OAuth) {
-      return LOGIN_URL;
-    }
-
-    const config = await this.getConfig({ withCache: false });
-    if (!config.oauth.enabled) {
-      return LOGIN_URL;
-    }
-
-    // Construire l'issuerUrl dynamiquement en fonction du hostname de la requête
-    const dynamicOauth = { ...config.oauth };
-    if (request) {
-      try {
-        const hostname = request.hostname || request.headers?.host?.split(':')[0];
-        if (hostname) {
-          dynamicOauth.issuerUrl = `http://${hostname}:3005/realms/ryvie`;
-        }
-      } catch (error) {
-        this.logger.warn(`Failed to extract hostname from request, using default issuerUrl: ${error}`);
-      }
-    }
-
-    return (await this.oauthRepository.getLogoutEndpoint(dynamicOauth)) || LOGIN_URL;
+    // Toujours rediriger vers la page de login de rPictures, sans passer par le provider OAuth
+    return LOGIN_URL;
   }
 
   private getBearerToken(headers: IncomingHttpHeaders): string | null {

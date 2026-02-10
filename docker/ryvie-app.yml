@@ -5,6 +5,7 @@ name: rPictures
 version: "v2.0.0"
 buildId: 3
 port: 3013
+sso: true
 description: >-
   Ryvie rPictures is a self-hosted photo local cloud storage solution
 gallery:

@@ -1,14 +1,11 @@
 <script lang="ts">
-  import { page } from '$app/stores';
   import ChangePinCodeSettings from '$lib/components/user-settings-page/PinCodeSettings.svelte';
   import DownloadSettings from '$lib/components/user-settings-page/download-settings.svelte';
   import FeatureSettings from '$lib/components/user-settings-page/feature-settings.svelte';
   import NotificationsSettings from '$lib/components/user-settings-page/notifications-settings.svelte';
   import UserUsageStatistic from '$lib/components/user-settings-page/user-usage-statistic.svelte';
-  import { OpenSettingQueryParameterValue, QueryParameter } from '$lib/constants';
-  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
+  import { QueryParameter } from '$lib/constants';
   import { user } from '$lib/stores/user.store';
-  import { oauth } from '$lib/utils';
   import { type ApiKeyResponseDto, type SessionResponseDto } from '@immich/sdk';
   import {
     mdiAccountGroupOutline,
@@ -19,19 +16,15 @@
     mdiDevices,
     mdiDownload,
     mdiFeatureSearchOutline,
-    mdiFormTextboxPassword,
     mdiKeyOutline,
     mdiLockSmart,
     mdiServerOutline,
-    mdiTwoFactorAuthentication,
   } from '@mdi/js';
   import { t } from 'svelte-i18n';
   import SettingAccordionState from '../shared-components/settings/setting-accordion-state.svelte';
   import SettingAccordion from '../shared-components/settings/setting-accordion.svelte';
   import AppSettings from './app-settings.svelte';
-  import ChangePasswordSettings from './change-password-settings.svelte';
   import DeviceList from './device-list.svelte';
-  import OAuthSettings from './oauth-settings.svelte';
   import PartnerSettings from './partner-settings.svelte';
   import UserAPIKeyList from './user-api-key-list.svelte';
   import UserProfileSettings from './user-profile-settings.svelte';
@@ -43,9 +36,6 @@
 
   let { keys = $bindable([]), sessions = $bindable([]) }: Props = $props();
 
-  let oauthOpen =
-    oauth.isCallback(globalThis.location) ||
-    $page.url.searchParams.get(QueryParameter.OPEN_SETTING) === OpenSettingQueryParameterValue.OAUTH;
 </script>
 
 <SettingAccordionState queryParam={QueryParameter.IS_OPEN}>
@@ -111,26 +101,6 @@
     <NotificationsSettings />
   </SettingAccordion>
 
-  {#if featureFlagsManager.value.oauth}
-    <SettingAccordion
-      icon={mdiTwoFactorAuthentication}
-      key="oauth"
-      title={$t('oauth')}
-      subtitle={$t('manage_your_oauth_connection')}
-      isOpen={oauthOpen || undefined}
-    >
-      <OAuthSettings user={$user} />
-    </SettingAccordion>
-  {/if}
-
-  <SettingAccordion
-    icon={mdiFormTextboxPassword}
-    key="password"
-    title={$t('password')}
-    subtitle={$t('change_your_password')}
-  >
-    <ChangePasswordSettings />
-  </SettingAccordion>
 
   <SettingAccordion
     icon={mdiAccountGroupOutline}
