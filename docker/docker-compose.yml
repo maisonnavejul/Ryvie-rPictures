@@ -12,7 +12,7 @@ name: rpictures
 services:
   rpictures-server:
     container_name: app-rpictures-server
-    image: julescloud/rpictures-server:v2.0.5
+    image: julescloud/rpictures-server:v2.0.6
     # extends:
     #   file: hwaccel.transcoding.yml
     #   service: cpu # set to one of [nvenc, quicksync, rkmpp, vaapi, vaapi-wsl] for accelerated transcoding
@@ -36,6 +36,7 @@ services:
     networks:
       - default
       - ldap_my_custom_network
+      - ryvie-network
 
   rpictures-machine-learning:
     container_name: app-rpictures-machine-learning
@@ -81,4 +82,6 @@ volumes:
 
 networks:
   ldap_my_custom_network:
+    external: true
+  ryvie-network:
     external: true

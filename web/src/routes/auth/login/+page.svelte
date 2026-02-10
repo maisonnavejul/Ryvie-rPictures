@@ -61,17 +61,15 @@
       }
     }
 
-    try {
-      if (
-        (featureFlagsManager.value.oauthAutoLaunch && !oauth.isAutoLaunchDisabled(globalThis.location)) ||
-        oauth.isAutoLaunchEnabled(globalThis.location)
-      ) {
-        await goto(`${AppRoute.AUTH_LOGIN}?autoLaunch=0`, { replaceState: true });
-        await oauth.authorize(globalThis.location);
+    if (
+      (featureFlagsManager.value.oauthAutoLaunch && !oauth.isAutoLaunchDisabled(globalThis.location)) ||
+      oauth.isAutoLaunchEnabled(globalThis.location)
+    ) {
+      await goto(`${AppRoute.AUTH_LOGIN}?autoLaunch=0`, { replaceState: true });
+      const success = await oauth.authorize(globalThis.location);
+      if (success) {
         return;
       }
-    } catch (error) {
-      handleError(error, $t('errors.unable_to_connect'));
     }
 
     oauthLoading = false;

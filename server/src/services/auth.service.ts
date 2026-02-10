@@ -80,7 +80,7 @@ export class AuthService extends BaseService {
     return this.createLoginResponse(user, details);
   }
 
-  async logout(auth: AuthDto, authType: AuthType): Promise<LogoutResponseDto> {
+  async logout(auth: AuthDto, authType: AuthType, request?: any): Promise<LogoutResponseDto> {
     if (auth.session) {
       await this.sessionRepository.delete(auth.session.id);
       await this.eventRepository.emit('SessionDelete', { sessionId: auth.session.id });
@@ -88,7 +88,7 @@ export class AuthService extends BaseService {
 
     return {
       successful: true,
-      redirectUri: await this.getLogoutEndpoint(authType),
+      redirectUri: await this.getLogoutEndpoint(authType, request),
     };
   }
 
@@ -247,8 +247,17 @@ export class AuthService extends BaseService {
       throw new BadRequestException('OAuth is not enabled');
     }
 
+    // Construire l'issuerUrl dynamiquement en fonction de l'origine
+    const dynamicOauth = { ...oauth };
+    try {
+      const redirectUrl = new URL(dto.redirectUri);
+      dynamicOauth.issuerUrl = `http://${redirectUrl.hostname}:3005/realms/ryvie`;
+    } catch (error) {
+      this.logger.warn(`Invalid redirectUri, using default issuerUrl: ${error}`);
+    }
+
     return await this.oauthRepository.authorize(
-      oauth,
+      dynamicOauth,
       this.resolveRedirectUri(oauth, dto.redirectUri),
       dto.state,
       dto.codeChallenge,
@@ -268,7 +277,17 @@ export class AuthService extends BaseService {
 
     const { oauth } = await this.getConfig({ withCache: false });
     const url = this.resolveRedirectUri(oauth, dto.url);
-    const profile = await this.oauthRepository.getProfile(oauth, url, expectedState, codeVerifier);
+    
+    // Construire l'issuerUrl dynamiquement en fonction de l'URL de callback
+    const dynamicOauth = { ...oauth };
+    try {
+      const callbackUrl = new URL(url);
+      dynamicOauth.issuerUrl = `http://${callbackUrl.hostname}:3005/realms/ryvie`;
+    } catch (error) {
+      this.logger.warn(`Invalid callback URL, using default issuerUrl: ${error}`);
+    }
+    
+    const profile = await this.oauthRepository.getProfile(dynamicOauth, url, expectedState, codeVerifier);
     const { autoRegister, defaultStorageQuota, storageLabelClaim, storageQuotaClaim, roleClaim } = oauth;
     this.logger.debug(`Logging in with OAuth: ${JSON.stringify(profile)}`);
     let user: UserAdmin | undefined = await this.userRepository.getByOAuthId(profile.sub);
@@ -384,17 +403,9 @@ export class AuthService extends BaseService {
     return mapUserAdmin(user);
   }
 
-  private async getLogoutEndpoint(authType: AuthType): Promise<string> {
-    if (authType !== AuthType.OAuth) {
-      return LOGIN_URL;
-    }
-
-    const config = await this.getConfig({ withCache: false });
-    if (!config.oauth.enabled) {
-      return LOGIN_URL;
-    }
-
-    return (await this.oauthRepository.getLogoutEndpoint(config.oauth)) || LOGIN_URL;
+  private async getLogoutEndpoint(authType: AuthType, request?: any): Promise<string> {
+    // Toujours rediriger vers la page de login de rPictures, sans passer par le provider OAuth
+    return LOGIN_URL;
   }
 
   private getBearerToken(headers: IncomingHttpHeaders): string | null {
