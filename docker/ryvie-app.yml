@@ -3,7 +3,7 @@ id: rpictures
 category: storage
 name: rPictures
 version: "v2.0.0"
-buildId: 3
+buildId: 11
 port: 3013
 sso: true
 description: >-
