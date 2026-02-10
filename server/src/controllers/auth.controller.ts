@@ -98,7 +98,7 @@ export class AuthController {
   ): Promise<LogoutResponseDto> {
     const authType = (request.cookies || {})[ImmichCookie.AuthType];
 
-    const body = await this.service.logout(auth, authType);
+    const body = await this.service.logout(auth, authType, request);
     return respondWithoutCookie(res, body, [
       ImmichCookie.AccessToken,
       ImmichCookie.AuthType,

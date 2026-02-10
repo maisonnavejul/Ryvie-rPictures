@@ -26,6 +26,9 @@ services:
       - .env
     ports:
       - 3013:2283
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "ryvie.local:host-gateway"
     depends_on:
       - redis
       - database
@@ -35,6 +38,7 @@ services:
     networks:
       - default
       - ldap_my_custom_network
+      - ryvie-network
 
   immich-machine-learning:
     container_name: immich_machine_learning
@@ -109,4 +113,6 @@ volumes:
 
 networks:
   ldap_my_custom_network:
+    external: true
+  ryvie-network:
     external: true
