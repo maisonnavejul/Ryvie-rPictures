@@ -85,7 +85,7 @@
     "kysely": "0.28.2",
     "kysely-postgres-js": "^3.0.0",
     "ldapjs": "^3.0.7",
-    "lodash": "^4.17.21",
+    "lodash": "^4.17.23",
     "luxon": "^3.4.2",
     "mnemonist": "^0.40.3",
     "multer": "^2.0.2",
