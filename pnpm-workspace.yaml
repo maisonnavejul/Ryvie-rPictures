@@ -29,6 +29,8 @@ onlyBuiltDependencies:
 overrides:
   canvas: 2.11.2
   sharp: ^0.34.5
+  postcss: 8.5.10
+  cookie: 1.0.2
   fast-xml-parser: 5.7.0
   protobufjs: 7.5.5
   tough-cookie: 4.1.3
