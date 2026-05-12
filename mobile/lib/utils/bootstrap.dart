@@ -42,15 +42,14 @@ void configureFileDownloaderNotifications() {
 
   FileDownloader().configureNotificationForGroup(
     kManualUploadGroup,
-    running: TaskNotification('uploading_media'.t(), 'backup_background_service_in_progress_notification'.t()),
-    complete: TaskNotification('upload_finished'.t(), 'backup_background_service_complete_notification'.t()),
     groupNotificationId: kManualUploadGroup,
   );
 
   FileDownloader().configureNotificationForGroup(
     kBackupGroup,
-    running: TaskNotification('uploading_media'.t(), 'backup_background_service_in_progress_notification'.t()),
-    complete: TaskNotification('upload_finished'.t(), 'backup_background_service_complete_notification'.t()),
+    // Static body so iOS only posts ONCE at the start (it suppresses updates with identical content)
+    running: const TaskNotification('rPictures', 'Sauvegarde en cours'),
+    complete: const TaskNotification('rPictures', 'Sauvegarde terminée'),
     groupNotificationId: kBackupGroup,
   );
 }

@@ -13,10 +13,12 @@ import 'package:immich_mobile/extensions/translate_extensions.dart';
 import 'package:immich_mobile/providers/app_settings.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
+import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/services/app_settings.service.dart';
 import 'package:immich_mobile/widgets/settings/settings_sub_page_scaffold.dart';
+import 'package:logging/logging.dart';
 
 class DriftBackupSettings extends ConsumerWidget {
   const DriftBackupSettings({super.key});
@@ -25,6 +27,8 @@ class DriftBackupSettings extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return SettingsSubPageScaffold(
       settings: [
+        const _AutoBackupToggle(),
+        const Divider(),
         Padding(
           padding: const EdgeInsets.only(left: 16.0),
           child: Text(
@@ -58,6 +62,80 @@ class DriftBackupSettings extends ConsumerWidget {
         ),
         const _AlbumSyncActionButton(),
       ],
+    );
+  }
+}
+
+class _AutoBackupToggle extends ConsumerStatefulWidget {
+  const _AutoBackupToggle();
+
+  @override
+  ConsumerState<_AutoBackupToggle> createState() => _AutoBackupToggleState();
+}
+
+class _AutoBackupToggleState extends ConsumerState<_AutoBackupToggle> {
+  static final _logger = Logger("AutoBackupToggle");
+  bool _isEnabled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _isEnabled = ref.read(appSettingsServiceProvider).getSetting(AppSettingsEnum.enableBackup);
+  }
+
+  Future<void> _onToggle(bool value) async {
+    _logger.info("Auto backup toggled: $value");
+    await ref.read(appSettingsServiceProvider).setSetting(AppSettingsEnum.enableBackup, value);
+    setState(() => _isEnabled = value);
+
+    if (value) {
+      final currentUser = Store.tryGet(StoreKey.currentUser);
+      if (currentUser == null) {
+        _logger.warning("Cannot start backup: no current user");
+        return;
+      }
+      final backupNotifier = ref.read(driftBackupProvider.notifier);
+      // Skip if a sync is already running to avoid double-sync notifications
+      if (ref.read(driftBackupProvider).isSyncing) {
+        _logger.info("Sync already in progress, skipping toggle-triggered sync");
+        return;
+      }
+      final backgroundSync = ref.read(backgroundSyncProvider);
+      backupNotifier.updateSyncing(true);
+      _logger.info("Starting remote sync before backup...");
+      final success = await backgroundSync.syncRemote();
+      if (!mounted) return;
+      backupNotifier.updateSyncing(false);
+      if (success) {
+        _logger.info("Remote sync OK, starting backup");
+        await backupNotifier.startBackup(currentUser.id);
+      } else {
+        _logger.warning("Remote sync failed, backup will not start");
+      }
+    } else {
+      _logger.info("Auto backup disabled, canceling active uploads");
+      await ref.read(driftBackupProvider.notifier).cancel();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isCanceling = ref.watch(driftBackupProvider.select((s) => s.isCanceling));
+    return ListTile(
+      title: Text(
+        "enable_backup".t(context: context),
+        style: context.textTheme.titleMedium?.copyWith(color: context.primaryColor),
+      ),
+      subtitle: Text(
+        "auto_backup_subtitle".t(context: context),
+        style: context.textTheme.labelLarge,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+      trailing: Switch.adaptive(
+        value: _isEnabled,
+        onChanged: isCanceling ? null : _onToggle,
+      ),
     );
   }
 }
@@ -252,8 +330,8 @@ class _UseWifiForUploadVideosButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return const _SettingsSwitchTile(
       appSettingsEnum: AppSettingsEnum.useCellularForUploadVideos,
-      titleKey: "videos",
-      subtitleKey: "network_requirement_videos_upload",
+      titleKey: "network_requirement_videos_upload",
+      subtitleKey: "network_requirement_videos_upload_sub",
     );
   }
 }
@@ -265,8 +343,8 @@ class _UseWifiForUploadPhotosButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return const _SettingsSwitchTile(
       appSettingsEnum: AppSettingsEnum.useCellularForUploadPhotos,
-      titleKey: "photos",
-      subtitleKey: "network_requirement_photos_upload",
+      titleKey: "network_requirement_photos_upload",
+      subtitleKey: "network_requirement_photos_upload_sub",
     );
   }
 }

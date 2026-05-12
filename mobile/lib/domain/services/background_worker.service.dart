@@ -222,27 +222,37 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         }
 
         if (!_isBackupEnabled) {
-          _logger.info("Backup is disabled. Skipping backup routine");
+          _logger.info("[BG] Backup is disabled. Skipping backup routine");
           return;
         }
 
         final currentUser = _ref?.read(currentUserProvider);
         if (currentUser == null) {
-          _logger.warning("No current user found. Skipping backup from background");
+          _logger.warning("[BG] No current user found. Skipping backup from background");
           return;
         }
 
         if (Platform.isIOS) {
-          return _ref?.read(driftBackupProvider.notifier).handleBackupResume(currentUser.id);
+          _logger.info("[BG] iOS: resuming/starting backup queue for user ${currentUser.id}");
+          final result = await _ref?.read(driftBackupProvider.notifier).handleBackupResume(currentUser.id);
+          final state = _ref?.read(driftBackupProvider);
+          if (state != null) {
+            _logger.info(
+              "[BG] iOS backup state: enqueued=${state.enqueueCount}/${state.enqueueTotalCount} "
+              "active=${state.uploadItems.length} remainder=${state.remainderCount}",
+            );
+          }
+          return result;
         }
 
+        _logger.info("[BG] Android: starting HTTP backup for user ${currentUser.id}");
         final networkCapabilities = await _ref?.read(connectivityApiProvider).getCapabilities() ?? [];
         return _ref
             ?.read(uploadServiceProvider)
             .startBackupWithHttpClient(currentUser.id, networkCapabilities.isUnmetered, _cancellationToken);
       },
       (error, stack) {
-        dPrint(() => "Error in backup zone $error, $stack");
+        _logger.severe("[BG] Error in backup zone", error, stack);
       },
     );
   }

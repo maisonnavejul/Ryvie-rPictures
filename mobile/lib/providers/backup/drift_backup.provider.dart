@@ -115,6 +115,14 @@ class DriftBackupState {
 
   final Map<String, DriftUploadStatus> uploadItems;
 
+  final int sessionCompletedCount;
+  final int sessionTotalCount;
+  final DateTime? sessionStartTime;
+  final int sessionUploadedBytes;
+  final bool isStartingBackup;
+  final int prepCandidateTotal;
+  final int prepCandidateProcessed;
+
   const DriftBackupState({
     required this.totalCount,
     required this.backupCount,
@@ -126,6 +134,13 @@ class DriftBackupState {
     required this.isSyncing,
     required this.uploadItems,
     this.error = BackupError.none,
+    this.sessionCompletedCount = 0,
+    this.sessionTotalCount = 0,
+    this.sessionStartTime,
+    this.sessionUploadedBytes = 0,
+    this.isStartingBackup = false,
+    this.prepCandidateTotal = 0,
+    this.prepCandidateProcessed = 0,
   });
 
   DriftBackupState copyWith({
@@ -139,6 +154,13 @@ class DriftBackupState {
     bool? isSyncing,
     Map<String, DriftUploadStatus>? uploadItems,
     BackupError? error,
+    int? sessionCompletedCount,
+    int? sessionTotalCount,
+    DateTime? sessionStartTime,
+    int? sessionUploadedBytes,
+    bool? isStartingBackup,
+    int? prepCandidateTotal,
+    int? prepCandidateProcessed,
   }) {
     return DriftBackupState(
       totalCount: totalCount ?? this.totalCount,
@@ -151,7 +173,38 @@ class DriftBackupState {
       isSyncing: isSyncing ?? this.isSyncing,
       uploadItems: uploadItems ?? this.uploadItems,
       error: error ?? this.error,
+      sessionCompletedCount: sessionCompletedCount ?? this.sessionCompletedCount,
+      sessionTotalCount: sessionTotalCount ?? this.sessionTotalCount,
+      sessionStartTime: sessionStartTime ?? this.sessionStartTime,
+      sessionUploadedBytes: sessionUploadedBytes ?? this.sessionUploadedBytes,
+      isStartingBackup: isStartingBackup ?? this.isStartingBackup,
+      prepCandidateTotal: prepCandidateTotal ?? this.prepCandidateTotal,
+      prepCandidateProcessed: prepCandidateProcessed ?? this.prepCandidateProcessed,
     );
+  }
+
+  bool get isUploading => uploadItems.isNotEmpty && !isCanceling;
+
+  bool get isActive =>
+      (isSyncing ||
+              isStartingBackup ||
+              enqueueTotalCount > 0 ||
+              processingCount > 0 ||
+              uploadItems.isNotEmpty) &&
+          !isCanceling;
+
+  double get sessionProgress {
+    if (sessionTotalCount == 0) return 0;
+    return sessionCompletedCount / sessionTotalCount;
+  }
+
+  Duration? get estimatedTimeRemaining {
+    if (sessionStartTime == null || sessionCompletedCount == 0) return null;
+    final elapsed = DateTime.now().difference(sessionStartTime!);
+    final remaining = sessionTotalCount - sessionCompletedCount;
+    if (remaining <= 0) return Duration.zero;
+    final msPerFile = elapsed.inMilliseconds / sessionCompletedCount;
+    return Duration(milliseconds: (msPerFile * remaining).round());
   }
 
   @override
@@ -173,7 +226,10 @@ class DriftBackupState {
         other.isCanceling == isCanceling &&
         other.isSyncing == isSyncing &&
         mapEquals(other.uploadItems, uploadItems) &&
-        other.error == error;
+        other.error == error &&
+        other.sessionCompletedCount == sessionCompletedCount &&
+        other.sessionTotalCount == sessionTotalCount &&
+        other.sessionUploadedBytes == sessionUploadedBytes;
   }
 
   @override
@@ -187,7 +243,10 @@ class DriftBackupState {
         isCanceling.hashCode ^
         isSyncing.hashCode ^
         uploadItems.hashCode ^
-        error.hashCode;
+        error.hashCode ^
+        sessionCompletedCount.hashCode ^
+        sessionTotalCount.hashCode ^
+        sessionUploadedBytes.hashCode;
   }
 }
 
@@ -238,7 +297,25 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
       case TaskStatus.complete:
         if (update.task.group == kBackupGroup) {
           if (update.responseStatusCode == 201) {
-            state = state.copyWith(backupCount: state.backupCount + 1, remainderCount: state.remainderCount - 1);
+            final completedItem = state.uploadItems[taskId];
+            final uploadedBytes = completedItem?.fileSize ?? 0;
+            final newCompleted = state.sessionCompletedCount + 1;
+            state = state.copyWith(
+              backupCount: state.backupCount + 1,
+              remainderCount: state.remainderCount - 1,
+              sessionCompletedCount: newCompleted,
+              sessionUploadedBytes: state.sessionUploadedBytes + uploadedBytes,
+            );
+            // Log progress milestones to avoid log spam: every 50 files or first/last
+            if (newCompleted == 1 || newCompleted % 50 == 0 || newCompleted == state.sessionTotalCount) {
+              _logger.info(
+                "Upload progress: $newCompleted/${state.sessionTotalCount} done (${update.task.displayName})",
+              );
+            }
+          } else {
+            _logger.warning(
+              "Upload finished with unexpected status ${update.responseStatusCode} for ${update.task.displayName}",
+            );
           }
         }
 
@@ -278,10 +355,11 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
             taskId: currentItem.copyWith(isFailed: true, error: error),
           },
         );
-        _logger.fine("Upload failed for taskId: $taskId, exception: ${update.exception}");
+        _logger.warning("Upload FAILED: ${update.task.displayName} → $error");
         break;
 
       case TaskStatus.canceled:
+        _logger.info("Upload canceled: ${update.task.displayName}");
         _removeUploadItem(update.task.taskId);
         break;
 
@@ -350,13 +428,34 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
     state = state.copyWith(isSyncing: isSyncing);
   }
 
-  Future<void> startBackup(String userId) {
-    state = state.copyWith(error: BackupError.none);
-    return _uploadService.startBackup(userId, _updateEnqueueCount);
+  Future<void> startBackup(String userId) async {
+    _logger.info("startBackup: queuing candidates (remainder=${state.remainderCount})");
+    state = state.copyWith(
+      error: BackupError.none,
+      sessionCompletedCount: 0,
+      sessionTotalCount: state.remainderCount,
+      sessionStartTime: DateTime.now(),
+      sessionUploadedBytes: 0,
+      isStartingBackup: true,
+      prepCandidateTotal: 0,
+      prepCandidateProcessed: 0,
+    );
+    try {
+      await _uploadService.startBackup(userId, _updateEnqueueCount, _updatePrepProgress);
+      _logger.info(
+        "startBackup: enqueued=${state.enqueueCount}/${state.enqueueTotalCount} prepared=${state.prepCandidateProcessed}/${state.prepCandidateTotal}",
+      );
+    } finally {
+      state = state.copyWith(isStartingBackup: false);
+    }
   }
 
   void _updateEnqueueCount(EnqueueStatus status) {
     state = state.copyWith(enqueueCount: status.enqueueCount, enqueueTotalCount: status.totalCount);
+  }
+
+  void _updatePrepProgress(int processed, int total) {
+    state = state.copyWith(prepCandidateProcessed: processed, prepCandidateTotal: total);
   }
 
   Future<void> cancel() async {
@@ -370,8 +469,13 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
       await cancel();
     } else {
       dPrint(() => "All tasks canceled successfully.");
-      // Clear all upload items when cancellation is complete
-      state = state.copyWith(isCanceling: false, uploadItems: {});
+      state = state.copyWith(
+        isCanceling: false,
+        uploadItems: {},
+        sessionCompletedCount: 0,
+        sessionTotalCount: 0,
+        sessionUploadedBytes: 0,
+      );
     }
   }
 

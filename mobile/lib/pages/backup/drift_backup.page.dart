@@ -5,21 +5,19 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
-import 'package:immich_mobile/domain/models/store.model.dart';
-import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/theme_extensions.dart';
 import 'package:immich_mobile/extensions/translate_extensions.dart';
 import 'package:immich_mobile/generated/intl_keys.g.dart';
-import 'package:immich_mobile/presentation/widgets/backup/backup_toggle_button.widget.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
 import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/sync_status.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/routing/router.dart';
+import 'package:immich_mobile/utils/bytes_units.dart';
 import 'package:immich_mobile/widgets/backup/backup_info_card.dart';
-import 'package:logging/logging.dart';
+import 'package:path/path.dart' as path;
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 @RoutePage()
@@ -45,15 +43,18 @@ class _DriftBackupPageState extends ConsumerState<DriftBackupPage> {
     }
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
       await ref.read(driftBackupProvider.notifier).getBackupStatus(currentUser.id);
+
+      // Skip if a sync is already running (e.g. triggered by the auto-backup toggle)
+      if (!mounted || ref.read(driftBackupProvider).isSyncing) return;
 
       ref.read(driftBackupProvider.notifier).updateSyncing(true);
       syncSuccess = await ref.read(backgroundSyncProvider).syncRemote();
-      ref.read(driftBackupProvider.notifier).updateSyncing(false);
 
-      if (mounted) {
-        await ref.read(driftBackupProvider.notifier).getBackupStatus(currentUser.id);
-      }
+      if (!mounted) return;
+      ref.read(driftBackupProvider.notifier).updateSyncing(false);
+      await ref.read(driftBackupProvider.notifier).getBackupStatus(currentUser.id);
     });
   }
 
@@ -71,34 +72,6 @@ class _DriftBackupPageState extends ConsumerState<DriftBackupPage> {
         .toList();
 
     final error = ref.watch(driftBackupProvider.select((p) => p.error));
-
-    final backupNotifier = ref.read(driftBackupProvider.notifier);
-    final backupSyncManager = ref.read(backgroundSyncProvider);
-
-    Future<void> startBackup() async {
-      final currentUser = Store.tryGet(StoreKey.currentUser);
-      if (currentUser == null) {
-        return;
-      }
-
-      if (syncSuccess == null) {
-        ref.read(driftBackupProvider.notifier).updateSyncing(true);
-        syncSuccess = await backupSyncManager.syncRemote();
-        ref.read(driftBackupProvider.notifier).updateSyncing(false);
-      }
-
-      await backupNotifier.getBackupStatus(currentUser.id);
-
-      if (syncSuccess == false) {
-        Logger("DriftBackupPage").warning("Remote sync did not complete successfully, skipping backup");
-        return;
-      }
-      await backupNotifier.startBackup(currentUser.id);
-    }
-
-    Future<void> stopBackup() async {
-      await backupNotifier.cancel();
-    }
 
     return Scaffold(
       appBar: AppBar(
@@ -133,14 +106,8 @@ class _DriftBackupPageState extends ConsumerState<DriftBackupPage> {
                   const _TotalCard(),
                   const _BackupCard(),
                   const _RemainderCard(),
-                  const Divider(),
-                  BackupToggleButton(
-                    onStart: () async => await startBackup(),
-                    onStop: () async {
-                      syncSuccess = null;
-                      await stopBackup();
-                    },
-                  ),
+                  const _PreparingStatus(),
+                  const _UploadProgressCard(),
                   switch (error) {
                     BackupError.none => const SizedBox.shrink(),
                     BackupError.syncFailed => Padding(
@@ -376,9 +343,6 @@ class _RemainderCard extends ConsumerWidget {
             ),
           ),
           const Divider(height: 0),
-          const _PreparingStatus(),
-          const Divider(height: 0),
-
           ListTile(
             enableFeedback: true,
             visualDensity: VisualDensity.compact,
@@ -394,6 +358,238 @@ class _RemainderCard extends ConsumerWidget {
             trailing: Icon(Icons.arrow_forward_ios, size: 16, color: context.colorScheme.onSurfaceVariant),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _UploadProgressCard extends ConsumerWidget {
+  const _UploadProgressCard();
+
+  String _formatDuration(Duration duration) {
+    if (duration.inHours > 0) {
+      return '${duration.inHours}h ${duration.inMinutes.remainder(60)}min';
+    }
+    if (duration.inMinutes > 0) {
+      return '${duration.inMinutes}min ${duration.inSeconds.remainder(60)}s';
+    }
+    return '${duration.inSeconds}s';
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final backupState = ref.watch(driftBackupProvider);
+    final uploadItems = backupState.uploadItems;
+
+    if (!backupState.isActive) {
+      return const SizedBox.shrink();
+    }
+
+    final isSyncing = backupState.isSyncing && uploadItems.isEmpty && backupState.enqueueTotalCount == 0;
+    final isStartingNoEnqueueYet = backupState.isStartingBackup &&
+        backupState.enqueueTotalCount == 0 &&
+        uploadItems.isEmpty &&
+        !backupState.isSyncing;
+    final isEnqueuing = backupState.enqueueTotalCount > 0 && uploadItems.isEmpty;
+    final isLooseProgress = isSyncing || isStartingNoEnqueueYet || isEnqueuing;
+
+    final completed = backupState.sessionCompletedCount;
+    final total = backupState.sessionTotalCount;
+    final progress = backupState.sessionProgress;
+    final eta = backupState.estimatedTimeRemaining;
+
+    final activeUploads = uploadItems.values.where((item) => item.isFailed != true).toList();
+    final failedCount = uploadItems.values.where((item) => item.isFailed == true).length;
+
+    String headerLabel;
+    if (isSyncing) {
+      headerLabel = 'Synchronisation...';
+    } else if (isStartingNoEnqueueYet) {
+      if (backupState.prepCandidateTotal > 0) {
+        headerLabel = 'Préparation... ${backupState.prepCandidateProcessed} / ${backupState.prepCandidateTotal}';
+      } else {
+        headerLabel = 'Préparation des fichiers...';
+      }
+    } else if (isEnqueuing) {
+      headerLabel = 'Préparation... ${backupState.enqueueCount} / ${backupState.enqueueTotalCount}';
+    } else {
+      headerLabel = 'Upload en cours';
+    }
+
+    return Card(
+      margin: const EdgeInsets.only(top: 8),
+      shape: RoundedRectangleBorder(
+        borderRadius: const BorderRadius.all(Radius.circular(20)),
+        side: BorderSide(color: context.colorScheme.outlineVariant, width: 1),
+      ),
+      elevation: 0,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                if (isLooseProgress)
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: context.primaryColor),
+                  )
+                else
+                  Icon(Icons.cloud_upload_rounded, color: context.primaryColor, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    headerLabel,
+                    style: context.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (!isLooseProgress)
+                  Text(
+                    '$completed / $total',
+                    style: context.textTheme.titleMedium?.copyWith(
+                      color: context.primaryColor,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            ClipRRect(
+              borderRadius: const BorderRadius.all(Radius.circular(8)),
+              child: isLooseProgress
+                  ? LinearProgressIndicator(
+                      minHeight: 8,
+                      backgroundColor: context.colorScheme.surfaceContainerHighest,
+                      color: context.primaryColor,
+                    )
+                  : TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0, end: progress),
+                      duration: const Duration(milliseconds: 500),
+                      builder: (context, value, _) => LinearProgressIndicator(
+                        value: value,
+                        minHeight: 8,
+                        backgroundColor: context.colorScheme.surfaceContainerHighest,
+                        color: context.primaryColor,
+                      ),
+                    ),
+            ),
+            if (!isLooseProgress) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Text(
+                  '${(progress * 100).toStringAsFixed(1)}%',
+                  style: context.textTheme.labelMedium?.copyWith(
+                    color: context.primaryColor,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (backupState.sessionUploadedBytes > 0) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    formatHumanReadableBytes(backupState.sessionUploadedBytes, 1),
+                    style: context.textTheme.labelMedium?.copyWith(
+                      color: context.colorScheme.onSurface.withValues(alpha: 0.6),
+                    ),
+                  ),
+                ],
+                const Spacer(),
+                if (eta != null)
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.timer_outlined,
+                        size: 14,
+                        color: context.colorScheme.onSurface.withValues(alpha: 0.6),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        '~${_formatDuration(eta)}',
+                        style: context.textTheme.labelMedium?.copyWith(
+                          color: context.colorScheme.onSurface.withValues(alpha: 0.6),
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+            if (failedCount > 0) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(Icons.error_outline, size: 14, color: context.colorScheme.error),
+                  const SizedBox(width: 4),
+                  Text(
+                    '$failedCount fichier${failedCount > 1 ? 's' : ''} en erreur',
+                    style: context.textTheme.labelMedium?.copyWith(color: context.colorScheme.error),
+                  ),
+                ],
+              ),
+            ],
+            if (activeUploads.isNotEmpty) ...[
+              const Divider(height: 20),
+              ...activeUploads.take(3).map((item) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            path.basename(item.filename),
+                            style: context.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w500),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 4),
+                          ClipRRect(
+                            borderRadius: const BorderRadius.all(Radius.circular(4)),
+                            child: LinearProgressIndicator(
+                              value: item.progress.clamp(0.0, 1.0),
+                              minHeight: 4,
+                              backgroundColor: context.colorScheme.surfaceContainerHighest,
+                              color: context.colorScheme.secondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          '${(item.progress * 100).clamp(0, 100).toStringAsFixed(0)}%',
+                          style: context.textTheme.labelSmall?.copyWith(fontWeight: FontWeight.bold),
+                        ),
+                        if (item.networkSpeedAsString.isNotEmpty)
+                          Text(
+                            item.networkSpeedAsString,
+                            style: context.textTheme.labelSmall?.copyWith(
+                              color: context.colorScheme.onSurface.withValues(alpha: 0.5),
+                              fontSize: 10,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              )),
+              if (activeUploads.length > 3)
+                Text(
+                  '+${activeUploads.length - 3} autre${activeUploads.length - 3 > 1 ? 's' : ''}...',
+                  style: context.textTheme.labelSmall?.copyWith(
+                    color: context.colorScheme.onSurface.withValues(alpha: 0.5),
+                  ),
+                ),
+            ],
+            ], // end if (!isPreparing && !isEnqueuing)
+          ],
+        ),
       ),
     );
   }
@@ -456,17 +652,20 @@ class _PreparingStatusState extends ConsumerState {
       return const SizedBox.shrink();
     }
 
-    return Row(
-      children: [
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.only(left: 1.0),
+    return Card(
+      margin: const EdgeInsets.only(top: 8),
+      shape: RoundedRectangleBorder(
+        borderRadius: const BorderRadius.all(Radius.circular(20)),
+        side: BorderSide(color: context.colorScheme.outlineVariant, width: 1),
+      ),
+      elevation: 0,
+      clipBehavior: Clip.antiAlias,
+      child: Row(
+        children: [
+          Expanded(
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8),
-              decoration: BoxDecoration(
-                color: context.colorScheme.surfaceContainerHigh.withValues(alpha: 0.5),
-                shape: BoxShape.rectangle,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12),
+              color: context.colorScheme.surfaceContainerHigh.withValues(alpha: 0.5),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -478,10 +677,11 @@ class _PreparingStatusState extends ConsumerState {
                           color: context.colorScheme.onSurface.withAlpha(200),
                         ),
                       ),
-                      const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 1.5)),
+                      const SizedBox(width: 8),
+                      const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 1.5)),
                     ],
                   ),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 4),
                   Text(
                     processingCount.toString(),
                     style: context.textTheme.titleMedium?.copyWith(
@@ -493,31 +693,31 @@ class _PreparingStatusState extends ConsumerState {
               ),
             ),
           ),
-        ),
-        Expanded(
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8),
-            decoration: BoxDecoration(color: context.colorScheme.primary.withValues(alpha: 0.1)),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  "ready_for_upload".t(context: context),
-                  style: context.textTheme.labelLarge?.copyWith(color: context.colorScheme.onSurface.withAlpha(200)),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  readyForUploadCount.toString(),
-                  style: context.textTheme.titleMedium?.copyWith(
-                    color: context.primaryColor,
-                    fontWeight: FontWeight.w600,
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12),
+              color: context.colorScheme.primary.withValues(alpha: 0.1),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    "ready_for_upload".t(context: context),
+                    style: context.textTheme.labelLarge?.copyWith(color: context.colorScheme.onSurface.withAlpha(200)),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 4),
+                  Text(
+                    readyForUploadCount.toString(),
+                    style: context.textTheme.titleMedium?.copyWith(
+                      color: context.primaryColor,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

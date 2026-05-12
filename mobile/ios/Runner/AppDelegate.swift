@@ -50,13 +50,13 @@ import UIKit
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
-  
+
   public static func registerPlugins(with engine: FlutterEngine) {
     NativeSyncApiImpl.register(with: engine.registrar(forPlugin: NativeSyncApiImpl.name)!)
     ThumbnailApiSetup.setUp(binaryMessenger: engine.binaryMessenger, api: ThumbnailApiImpl())
     BackgroundWorkerFgHostApiSetup.setUp(binaryMessenger: engine.binaryMessenger, api: BackgroundWorkerApiImpl())
   }
-  
+
   public static func cancelPlugins(with engine: FlutterEngine) {
     (engine.valuePublished(byPlugin: NativeSyncApiImpl.name) as? NativeSyncApiImpl)?.detachFromEngine()
   }

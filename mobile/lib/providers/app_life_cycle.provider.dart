@@ -67,7 +67,7 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
     } catch (e, stackTrace) {
       _log.severe("Error during app resume", e, stackTrace);
     } finally {
-      if (!_resumeOperation!.isCompleted) {
+      if (_resumeOperation != null && !_resumeOperation!.isCompleted) {
         _resumeOperation!.complete();
       }
       _resumeOperation = null;
@@ -196,12 +196,8 @@ class AppLifeCycleNotifier extends StateNotifier<AppLifeCycleEnum> {
         _safeRun(backgroundManager.syncRemote().then((success) => syncSuccess = success), "syncRemote"),
       ]);
       if (syncSuccess) {
-        await Future.wait([
-          _safeRun(backgroundManager.hashAssets(), "hashAssets").then((_) {
-            _resumeBackup();
-          }),
-          _resumeBackup(),
-        ]);
+        await _safeRun(backgroundManager.hashAssets(), "hashAssets");
+        await _resumeBackup();
       } else {
         await _safeRun(backgroundManager.hashAssets(), "hashAssets");
       }

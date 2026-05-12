@@ -121,39 +121,68 @@ class UploadService {
   /// Find backup candidates
   /// Build the upload tasks
   /// Enqueue the tasks
-  Future<void> startBackup(String userId, void Function(EnqueueStatus status) onEnqueueTasks) async {
+  Future<void> startBackup(
+    String userId,
+    void Function(EnqueueStatus status) onEnqueueTasks, [
+    void Function(int processed, int total)? onPrepProgress,
+  ]) async {
+    final sw = Stopwatch()..start();
     await _storageRepository.clearCache();
 
     shouldAbortQueuingTasks = false;
 
     final candidates = await _backupRepository.getCandidates(userId);
     if (candidates.isEmpty) {
+      _logger.info("startBackup: no candidates, everything already backed up");
       return;
     }
+    _logger.info("startBackup: found ${candidates.length} candidates to process");
 
-    const batchSize = 100;
+    // Immediately report total so the UI can show "Préparation 0 / N" right away
+    onPrepProgress?.call(0, candidates.length);
+    onEnqueueTasks(EnqueueStatus(enqueueCount: 0, totalCount: candidates.length));
+
+    const batchSize = 500;
+    const parallelPrepare = 10;
     int count = 0;
+    int processed = 0;
+    int skipped = 0;
     for (int i = 0; i < candidates.length; i += batchSize) {
       if (shouldAbortQueuingTasks) {
+        _logger.warning("startBackup: aborted by user at $processed/${candidates.length}");
         break;
       }
 
       final batch = candidates.skip(i).take(batchSize).toList();
-      List<UploadTask> tasks = [];
-      for (final asset in batch) {
-        final task = await getUploadTask(asset);
-        if (task != null) {
-          tasks.add(task);
-        }
+      final tasks = <UploadTask>[];
+
+      // Prepare tasks in parallel sub-batches to speed up file resolution
+      for (int j = 0; j < batch.length; j += parallelPrepare) {
+        if (shouldAbortQueuingTasks) break;
+        final subBatch = batch.skip(j).take(parallelPrepare).toList();
+        final results = await Future.wait(subBatch.map(getUploadTask));
+        final added = results.whereType<UploadTask>().toList();
+        tasks.addAll(added);
+        skipped += subBatch.length - added.length;
+        processed += subBatch.length;
+        onPrepProgress?.call(processed, candidates.length);
       }
 
       if (tasks.isNotEmpty && !shouldAbortQueuingTasks) {
         count += tasks.length;
-        await enqueueTasks(tasks);
-
+        try {
+          await enqueueTasks(tasks);
+          _logger.info("startBackup: enqueued ${tasks.length} (total: $count/${candidates.length})");
+        } catch (e, st) {
+          _logger.severe("startBackup: failed to enqueue batch of ${tasks.length}", e, st);
+        }
         onEnqueueTasks(EnqueueStatus(enqueueCount: count, totalCount: candidates.length));
       }
     }
+    sw.stop();
+    _logger.info(
+      "startBackup: done in ${sw.elapsed.inSeconds}s — enqueued=$count, skipped=$skipped (iCloud/missing), total candidates=${candidates.length}",
+    );
   }
 
   Future<void> startBackupWithHttpClient(String userId, bool hasWifi, CancellationToken token) async {
@@ -221,7 +250,7 @@ class UploadService {
             final path = await update.task.filePath();
             await File(path).delete();
           } catch (e) {
-            _logger.severe('Error deleting file path for iOS: $e');
+            _logger.fine('Temp file already deleted for iOS: $e');
           }
         }
 
