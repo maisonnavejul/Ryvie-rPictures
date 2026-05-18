@@ -35,8 +35,16 @@ class DriftUploadStatus {
   final double progress;
   final int fileSize;
   final String networkSpeedAsString;
+  final double networkSpeed; // MB/s, -1.0 if unknown
   final bool? isFailed;
   final String? error;
+  /// Timestamp du premier progress event reçu pour ce task. Sert au watchdog
+  /// pour identifier les tasks "vieux et bloqués" et les logger dans le
+  /// health-check.
+  final DateTime? firstSeenAt;
+  /// Dernier progress event où `progress` ou les bytes ont augmenté.
+  /// Si on stagne, on peut détecter quel task spécifiquement est bloqué.
+  final DateTime? lastProgressAt;
 
   const DriftUploadStatus({
     required this.taskId,
@@ -44,8 +52,11 @@ class DriftUploadStatus {
     required this.progress,
     required this.fileSize,
     required this.networkSpeedAsString,
+    this.networkSpeed = -1.0,
     this.isFailed,
     this.error,
+    this.firstSeenAt,
+    this.lastProgressAt,
   });
 
   DriftUploadStatus copyWith({
@@ -54,8 +65,11 @@ class DriftUploadStatus {
     double? progress,
     int? fileSize,
     String? networkSpeedAsString,
+    double? networkSpeed,
     bool? isFailed,
     String? error,
+    DateTime? firstSeenAt,
+    DateTime? lastProgressAt,
   }) {
     return DriftUploadStatus(
       taskId: taskId ?? this.taskId,
@@ -63,8 +77,11 @@ class DriftUploadStatus {
       progress: progress ?? this.progress,
       fileSize: fileSize ?? this.fileSize,
       networkSpeedAsString: networkSpeedAsString ?? this.networkSpeedAsString,
+      networkSpeed: networkSpeed ?? this.networkSpeed,
       isFailed: isFailed ?? this.isFailed,
       error: error ?? this.error,
+      firstSeenAt: firstSeenAt ?? this.firstSeenAt,
+      lastProgressAt: lastProgressAt ?? this.lastProgressAt,
     );
   }
 
@@ -122,6 +139,11 @@ class DriftBackupState {
   final bool isStartingBackup;
   final int prepCandidateTotal;
   final int prepCandidateProcessed;
+  /// Files that cannot be uploaded right now (e.g. iCloud-only originals that
+  /// PhotoKit refuses to hand back). Surfaced to the UI so we can exclude them
+  /// from "remaining" and show "Tout est sauvegardé" once all reachable files
+  /// are done.
+  final int unreachableCount;
 
   const DriftBackupState({
     required this.totalCount,
@@ -141,7 +163,16 @@ class DriftBackupState {
     this.isStartingBackup = false,
     this.prepCandidateTotal = 0,
     this.prepCandidateProcessed = 0,
+    this.recentSpeedMBs = 0,
+    this.unreachableCount = 0,
   });
+
+  /// Remainder count minus files we already know are unreachable (e.g. iCloud).
+  /// This is what the UI should use to decide if there's still "work" to do.
+  int get effectiveRemainderCount {
+    final eff = remainderCount - unreachableCount;
+    return eff > 0 ? eff : 0;
+  }
 
   DriftBackupState copyWith({
     int? totalCount,
@@ -161,6 +192,8 @@ class DriftBackupState {
     bool? isStartingBackup,
     int? prepCandidateTotal,
     int? prepCandidateProcessed,
+    double? recentSpeedMBs,
+    int? unreachableCount,
   }) {
     return DriftBackupState(
       totalCount: totalCount ?? this.totalCount,
@@ -180,6 +213,8 @@ class DriftBackupState {
       isStartingBackup: isStartingBackup ?? this.isStartingBackup,
       prepCandidateTotal: prepCandidateTotal ?? this.prepCandidateTotal,
       prepCandidateProcessed: prepCandidateProcessed ?? this.prepCandidateProcessed,
+      recentSpeedMBs: recentSpeedMBs ?? this.recentSpeedMBs,
+      unreachableCount: unreachableCount ?? this.unreachableCount,
     );
   }
 
@@ -193,19 +228,43 @@ class DriftBackupState {
               uploadItems.isNotEmpty) &&
           !isCanceling;
 
+  /// Dynamic total = files done this session + files still reachable.
+  /// Excludes unreachable files (iCloud-only) so the "Upload en cours X / Y"
+  /// stays coherent with the "Restant" card.
+  ///
+  /// Important: on retire AUSSI les unreachables de sessionTotalCount.
+  /// Sinon, après une session où des fichiers iCloud ont été comptés dans le
+  /// total et qu'une nouvelle photo arrive, on aurait "1/12" au lieu de "1/1"
+  /// (sessionTotalCount=12 mais 11 sont en réalité non-uploadables).
+  int get displayedSessionTotal {
+    final reachable = sessionCompletedCount + effectiveRemainderCount;
+    final adjustedSessionTotal = sessionTotalCount - unreachableCount;
+    final floor = adjustedSessionTotal > 0 ? adjustedSessionTotal : 0;
+    return reachable > floor ? reachable : floor;
+  }
+
   double get sessionProgress {
-    if (sessionTotalCount == 0) return 0;
-    return sessionCompletedCount / sessionTotalCount;
+    final total = displayedSessionTotal;
+    if (total == 0) return 0;
+    return sessionCompletedCount / total;
   }
 
   Duration? get estimatedTimeRemaining {
     if (sessionStartTime == null || sessionCompletedCount == 0) return null;
     final elapsed = DateTime.now().difference(sessionStartTime!);
-    final remaining = sessionTotalCount - sessionCompletedCount;
+    final remaining = displayedSessionTotal - sessionCompletedCount;
     if (remaining <= 0) return Duration.zero;
     final msPerFile = elapsed.inMilliseconds / sessionCompletedCount;
     return Duration(milliseconds: (msPerFile * remaining).round());
   }
+
+  /// Rolling 2-minute upload speed in MB/s.
+  /// Computed in the notifier from a sliding window of (timestamp, bytes) samples,
+  /// exposed via state copies. Returns 0 if no recent samples or window too short.
+  double get sessionAverageSpeedMBs => recentSpeedMBs;
+
+  /// Recent speed sample (computed by the notifier from a rolling window)
+  final double recentSpeedMBs;
 
   @override
   String toString() {
@@ -281,6 +340,384 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
   StreamSubscription<TaskProgressUpdate>? _progressSubscription;
   final _logger = Logger("DriftBackupNotifier");
 
+  Timer? _stalledWatchdog;
+  Timer? _retrySweeper;
+  String? _currentUserId;
+
+  // Health-check snapshot from the previous tick — used to detect real progress.
+  int _lastCheckCompletedCount = 0;
+  int _lastCheckUploadedBytes = 0;
+  // Number of consecutive 60s ticks where uploads stalled without recovery.
+  int _stalledTicks = 0;
+
+  // Rolling 2-minute window of (timestamp, cumulative bytes) samples used to
+  // compute a recent speed indicator. The user wants speed reflecting the LAST
+  // 2 minutes, not the entire session average.
+  static const Duration _speedWindow = Duration(minutes: 2);
+  final List<(DateTime, int)> _byteSamples = [];
+
+  // Throttle the low-watermark refill so we don't fire continueBackup on every
+  // single completion (which would spam getCandidates queries on the DB).
+  DateTime _lastTopUpAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Trigger continueBackup proactively when the in-flight queue gets low,
+  /// keeping iOS fed with fresh tasks at all times.
+  void _maybeTopUpQueue() {
+    // Only top up when:
+    //  - queue is getting low (< 50 active uploads)
+    //  - there are still REACHABLE files to back up (excludes iCloud-only)
+    //  - we know the user
+    //  - not already enqueueing
+    //  - haven't already topped up in the last 15 seconds
+    if (state.uploadItems.length >= 50) return;
+    if (state.effectiveRemainderCount <= 0) return;
+    if (state.isStartingBackup) return;
+    if (_currentUserId == null) return;
+    final now = DateTime.now();
+    if (now.difference(_lastTopUpAt).inSeconds < 15) return;
+    _lastTopUpAt = now;
+    _logger.info(
+      "Low watermark: queue=${state.uploadItems.length}, remaining=${state.remainderCount} — proactively topping up",
+    );
+    unawaited(continueBackup(_currentUserId!));
+  }
+
+  void _pushByteSample(int totalBytes) {
+    final now = DateTime.now();
+    _byteSamples.add((now, totalBytes));
+    // Drop samples outside the window
+    final cutoff = now.subtract(_speedWindow);
+    _byteSamples.removeWhere((s) => s.$1.isBefore(cutoff));
+    // Compute and publish recent speed
+    if (_byteSamples.length < 2) {
+      if (state.recentSpeedMBs != 0) {
+        state = state.copyWith(recentSpeedMBs: 0);
+      }
+      return;
+    }
+    final first = _byteSamples.first;
+    final last = _byteSamples.last;
+    final dtSec = last.$1.difference(first.$1).inMilliseconds / 1000.0;
+    if (dtSec <= 0.1) return;
+    final speed = ((last.$2 - first.$2) / dtSec) / (1024 * 1024);
+    state = state.copyWith(recentSpeedMBs: speed > 0 ? speed : 0);
+  }
+
+  /// Tourne toutes les 15s : cancelle les tâches stuck en WAITING_RETRY
+  /// depuis plus de 15s. Cancel = libère le slot iOS + le fichier sera
+  /// re-enqueué comme nouveau task au prochain `continueBackup`. iOS traite
+  /// le nouveau task comme neuf (pas de back-off), donc retry effectif en
+  /// ~15-20s au lieu de 30s/60s/120s avec le back-off natif d'iOS.
+  ///
+  /// IMPORTANT : si >50% des tâches actives sont en WAITING_RETRY (signe que
+  /// iOS rejette en masse — typiquement EMFILE ou taskId reuse), on N'ARRÊTE
+  /// PAS de cancel + re-enqueue, ça empire la situation. On laisse passer
+  /// 1 cycle pour laisser iOS respirer. Le health-check 60s déclenchera un
+  /// FULL RESTART si le souci persiste.
+  Future<void> _cancelStuckRetries() async {
+    if (state.uploadItems.isEmpty) return;
+
+    final waitingRetry = state.uploadItems.values
+        .where((item) => item.progress == kUploadStatusWaitingToRetry)
+        .length;
+    final ratio = waitingRetry / state.uploadItems.length;
+    if (ratio > 0.5 && state.uploadItems.length >= 10) {
+      _logger.warning(
+        "Retry sweeper: SKIP — too many tasks in retry "
+        "($waitingRetry/${state.uploadItems.length} = ${(ratio * 100).toStringAsFixed(0)}%) "
+        "— iOS likely refusing enqueues, letting it settle",
+      );
+      return;
+    }
+
+    const stuckRetryThreshold = Duration(seconds: 15);
+    final now = DateTime.now();
+    final stuckIds = <String>[];
+    for (final item in state.uploadItems.values) {
+      if (item.progress != kUploadStatusWaitingToRetry) continue;
+      if (item.firstSeenAt == null) continue;
+      if (now.difference(item.firstSeenAt!) > stuckRetryThreshold) {
+        stuckIds.add(item.taskId);
+      }
+    }
+    if (stuckIds.isEmpty) return;
+    _logger.info(
+      "Retry sweeper: cancelling ${stuckIds.length} task(s) stuck in WAITING_RETRY >15s — "
+      "they will be re-enqueued fresh (no iOS back-off)",
+    );
+    try {
+      await _uploadService.cancelTasks(stuckIds);
+    } catch (e, st) {
+      _logger.warning("Retry sweeper: failed to cancel: $e", e, st);
+    }
+    final cleaned = Map<String, DriftUploadStatus>.from(state.uploadItems)
+      ..removeWhere((id, _) => stuckIds.contains(id));
+    state = state.copyWith(uploadItems: cleaned);
+    // Attendre 5s avant de top-up : iOS a besoin de libérer ses ressources
+    // (fichiers temporaires, sockets) avant qu'on re-enqueue. Sans cette
+    // pause, on re-tape immédiatement et iOS re-rejette en cascade.
+    await Future.delayed(const Duration(seconds: 5));
+    // Force le top-up (bypass le throttle 15s).
+    _lastTopUpAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _maybeTopUpQueue();
+  }
+
+  /// Health check that runs every 60 seconds and ALWAYS logs an OK / NOT OK line
+  /// at INFO level so the upload state is visible in the journal. When uploads
+  /// are stalled, it triggers progressive recovery (kick → full restart).
+  /// Plus un timer 15s dédié à la cancellation rapide des tâches stuck en
+  /// `WAITING_RETRY` — ça force un retry frais (iOS traite comme nouveau task)
+  /// au lieu d'attendre son back-off exponentiel (30s/60s/120s).
+  void _ensureWatchdogRunning() {
+    if (_stalledWatchdog != null) return;
+    // Capture baseline so the first tick has something to compare to.
+    _lastCheckCompletedCount = state.sessionCompletedCount;
+    _lastCheckUploadedBytes = state.sessionUploadedBytes;
+    _stalledTicks = 0;
+    _stalledWatchdog = Timer.periodic(const Duration(seconds: 60), (_) => _runHealthCheck());
+    _retrySweeper = Timer.periodic(const Duration(seconds: 15), (_) => _cancelStuckRetries());
+    _logger.info("Backup health-check started (60s interval)");
+  }
+
+  Future<void> _runHealthCheck() async {
+    // Nothing left to do (no uploads + no reachable remainder) — stop the timer.
+    if (state.uploadItems.isEmpty && state.effectiveRemainderCount == 0 && !state.isStartingBackup) {
+      if (state.unreachableCount > 0) {
+        _logger.info(
+          "Backup health-check: complete (${state.unreachableCount} files unreachable / iCloud, not retried) — stopping watchdog",
+        );
+      } else {
+        _logger.info("Backup health-check: idle (everything backed up) — stopping watchdog");
+      }
+      _stalledWatchdog?.cancel();
+      _stalledWatchdog = null;
+      _retrySweeper?.cancel();
+      _retrySweeper = null;
+      _stalledTicks = 0;
+      return;
+    }
+
+    final completedDelta = state.sessionCompletedCount - _lastCheckCompletedCount;
+    final bytesDelta = state.sessionUploadedBytes - _lastCheckUploadedBytes;
+    _lastCheckCompletedCount = state.sessionCompletedCount;
+    _lastCheckUploadedBytes = state.sessionUploadedBytes;
+    final mbDelta = bytesDelta / (1024 * 1024);
+
+    final enqStatus = state.isStartingBackup ? " [enqueueing]" : "";
+    // Breakdown des tâches actives : running (progress 0..1) vs waiting_retry
+    // (iOS back-off, progress=-4) vs failed (progress=-1). Permet de voir en
+    // une ligne si le souci est iOS (waiting_retry élevé) ou autre.
+    int running = 0;
+    int waitingRetry = 0;
+    int failedShown = 0;
+    for (final item in state.uploadItems.values) {
+      if (item.isFailed == true) {
+        failedShown++;
+      } else if (item.progress == kUploadStatusWaitingToRetry) {
+        waitingRetry++;
+      } else {
+        running++;
+      }
+    }
+    final breakdown = "active=${state.uploadItems.length}"
+        "[run=$running,retry=$waitingRetry${failedShown > 0 ? ",fail=$failedShown" : ""}]";
+    final snapshot = "$breakdown "
+        "remaining=${state.remainderCount} "
+        "session=${state.sessionCompletedCount}/${state.displayedSessionTotal}$enqStatus";
+
+    // Real progress detected — uploads are moving forward.
+    // We don't skip the check when enqueueing: uploads and enqueueing run in
+    // parallel, and enqueueing 7000 candidates can take 10+ minutes during which
+    // uploads can genuinely stall. Only sessionCompletedCount / bytes moving counts.
+    if (completedDelta > 0 || bytesDelta > 0) {
+      _stalledTicks = 0;
+      _logger.info(
+        "Backup health-check: OK (+$completedDelta files / +${mbDelta.toStringAsFixed(1)} MB in 60s, $snapshot)",
+      );
+      return;
+    }
+
+    // No upload progress in 60s.
+    // Special case: brand-new session with no uploads yet (uploadItems empty AND
+    // isStartingBackup true) — we're still building the queue, give it more time.
+    if (state.uploadItems.isEmpty && state.isStartingBackup && state.sessionCompletedCount == 0) {
+      _logger.info("Backup health-check: OK (warming up, $snapshot)");
+      return;
+    }
+
+    // Special case: queue is empty AND there's nothing to do (no active uploads,
+    // no fresh candidates being added). This happens when remaining files are
+    // all iCloud-only and have been cached as "failed". Not a real stall.
+    if (state.uploadItems.isEmpty && state.enqueueCount == state.enqueueTotalCount && state.remainderCount > 0) {
+      _logger.info(
+        "Backup health-check: OK (idle — ${state.remainderCount} files remain but appear non-uploadable, likely iCloud-only, $snapshot)",
+      );
+      _stalledTicks = 0;
+      return;
+    }
+
+    // Cancellation rapide des stuck retries est gérée par _cancelStuckRetries
+    // (timer 15s). Ici, si TOUTES les tâches actives restantes sont en
+    // `waitingToRetry` mais pas encore trop vieilles, on laisse iOS gérer.
+    // Pas de FULL RESTART : on annulerait le retry qui aurait peut-être réussi.
+    final allWaitingRetry = state.uploadItems.values.every(
+      (item) => item.progress == kUploadStatusWaitingToRetry,
+    );
+    if (allWaitingRetry && state.uploadItems.isNotEmpty) {
+      _logger.info(
+        "Backup health-check: OK (all ${state.uploadItems.length} active tasks are in iOS retry back-off — "
+        "letting NSURLSession handle it, $snapshot)",
+      );
+      _stalledTicks = 0;
+      return;
+    }
+
+    // Suspected stall — count it and trigger recovery.
+    _stalledTicks++;
+    final waitingRetryCount = state.uploadItems.values
+        .where((item) => item.progress == kUploadStatusWaitingToRetry)
+        .length;
+    _logger.info(
+      "Backup health-check: NOT OK — no progress in 60s "
+      "(stalled $_stalledTicks tick(s), waiting_retry=$waitingRetryCount, $snapshot)",
+    );
+
+    // Dump détaillé des tâches actives : âge depuis 1er progress, date du
+    // dernier vrai progress, % actuel, vitesse, taille. Permet de voir
+    // EXACTEMENT quels fichiers sont bloqués et depuis combien de temps.
+    if (state.uploadItems.isNotEmpty) {
+      final now = DateTime.now();
+      final entries = state.uploadItems.values.toList()
+        ..sort((a, b) => (a.firstSeenAt ?? now).compareTo(b.firstSeenAt ?? now));
+      _logger.info("Backup health-check: ${entries.length} active task(s) — details:");
+      for (final item in entries.take(20)) {
+        final age = item.firstSeenAt != null
+            ? '${now.difference(item.firstSeenAt!).inSeconds}s'
+            : '?';
+        final sinceProgress = item.lastProgressAt != null
+            ? '${now.difference(item.lastProgressAt!).inSeconds}s'
+            : '?';
+        final sizeMb = (item.fileSize / (1024 * 1024)).toStringAsFixed(1);
+        final String pctLabel;
+        if (item.progress == kUploadStatusWaitingToRetry) {
+          pctLabel = 'WAITING_RETRY';
+        } else if (item.progress == kUploadStatusFailed) {
+          pctLabel = 'FAILED';
+        } else if (item.progress == kUploadStatusCanceled) {
+          pctLabel = 'CANCELED';
+        } else {
+          pctLabel = '${(item.progress * 100).toStringAsFixed(0)}%';
+        }
+        final speed = item.networkSpeed > 0
+            ? '${item.networkSpeed.toStringAsFixed(2)} MB/s'
+            : 'idle';
+        _logger.info(
+          "  • ${item.filename} [$pctLabel] size=${sizeMb}MB age=$age noProgress=$sinceProgress speed=$speed",
+        );
+      }
+      if (entries.length > 20) {
+        _logger.info("  ... and ${entries.length - 20} more");
+      }
+    }
+
+    // Progressive recovery — DON'T short-circuit on isStartingBackup because a
+    // large enqueue can run for 10+ minutes while uploads are stuck:
+    //  - tick 1 (60s):  cheap kick — FileDownloader.start() wakes NSURLSession if just paused
+    //  - tick 2 (120s): FULL RESTART — mimics what closing & reopening the app does.
+    //                   Resets everything in iOS, then re-enqueues fresh — KEEPING the
+    //                   session counters (X files / Y MB) visible so the user doesn't lose
+    //                   sight of what was already done.
+    try {
+      if (_stalledTicks == 1) {
+        _logger.info("Backup health-check: kicking FileDownloader.start()");
+        await _uploadService.resumeBackup();
+        return;
+      }
+
+      // Tick 2+ → FULL RESTART
+      _logger.warning(
+        "Backup health-check: FULL RESTART (tick $_stalledTicks) — equivalent to closing/reopening the app, "
+        "but session counters are preserved",
+      );
+
+      // Snapshot the visible counters so we can restore them after the reset
+      final preservedCompleted = state.sessionCompletedCount;
+      final preservedTotal = state.displayedSessionTotal;
+      final preservedBytes = state.sessionUploadedBytes;
+      final preservedStartTime = state.sessionStartTime;
+      _logger.info("FULL RESTART step 1/6: signalling abort + cancelling all FileDownloader tasks");
+
+      // 1. Tear down the FileDownloader queue at the iOS level (cancels all tasks +
+      //    wipes localstore records). Wrapped with a timeout because on iOS with
+      //    thousands of records, reset/delete can hang or hit EMFILE.
+      try {
+        await _uploadService.forceResetQueue().timeout(
+          const Duration(seconds: 8),
+          onTimeout: () {
+            _logger.warning("FULL RESTART: forceResetQueue timed out after 8s, proceeding anyway");
+          },
+        );
+      } catch (e, st) {
+        _logger.severe("FULL RESTART: forceResetQueue threw, proceeding anyway", e, st);
+      }
+      _logger.info("FULL RESTART step 2/6: reset done");
+
+      // 2. Clear visible upload items & ongoing flags, KEEP session totals
+      state = state.copyWith(
+        uploadItems: {},
+        isStartingBackup: false,
+        isCanceling: false,
+        sessionCompletedCount: preservedCompleted,
+        sessionTotalCount: preservedTotal,
+        sessionUploadedBytes: preservedBytes,
+        sessionStartTime: preservedStartTime,
+        enqueueCount: 0,
+        enqueueTotalCount: 0,
+      );
+      _logger.info("FULL RESTART step 3/6: state cleared, counters preserved ($preservedCompleted files)");
+
+      // 3. Give iOS ~2s to actually release NSURLSession sockets
+      await Future.delayed(const Duration(seconds: 2));
+      _logger.info("FULL RESTART step 4/6: 2s wait done");
+
+      // 4. Explicitly kick FileDownloader to make sure it processes fresh enqueues
+      try {
+        await _uploadService.resumeBackup();
+      } catch (e, st) {
+        _logger.warning("FULL RESTART: resumeBackup failed: $e", e, st);
+      }
+      _logger.info("FULL RESTART step 5/6: FileDownloader.start() called");
+
+      // 5. Re-enqueue from scratch — same path as fresh app launch (handleBackupResume).
+      //    continueBackup preserves session counters since sessionStartTime is set.
+      if (_currentUserId != null) {
+        _logger.info(
+          "FULL RESTART step 6/6: re-enqueueing (session preserved: $preservedCompleted files / "
+          "${(preservedBytes / (1024 * 1024)).toStringAsFixed(1)} MB)",
+        );
+        unawaited(continueBackup(_currentUserId!));
+      } else {
+        _logger.warning("FULL RESTART step 6/6: _currentUserId is null, cannot re-enqueue!");
+      }
+
+      // Reset stalled counter so we don't loop the restart every 60s during re-enqueue
+      _stalledTicks = 0;
+    } catch (e, st) {
+      // EMFILE (errno 24, "Too many open files") happens on iOS when there
+      // are too many task records in the FileDownloader localstore. The fix
+      // (deleting records on completion) takes effect over time. Just warn here.
+      final errStr = e.toString();
+      if (errStr.contains('errno = 24') || errStr.contains('Too many open files')) {
+        _logger.warning(
+          "Backup health-check: hit iOS file descriptor limit (EMFILE) — will retry next tick. "
+          "Completed task records are being cleaned up automatically.",
+        );
+      } else {
+        _logger.severe("Backup health-check: recovery action failed", e, st);
+      }
+    }
+  }
+
   /// Remove upload item from state
   void _removeUploadItem(String taskId) {
     if (state.uploadItems.containsKey(taskId)) {
@@ -296,25 +733,50 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
     switch (update.status) {
       case TaskStatus.complete:
         if (update.task.group == kBackupGroup) {
-          if (update.responseStatusCode == 201) {
+          final statusCode = update.responseStatusCode;
+          // Accept any 2xx as success. The server may return:
+          //  - 201 Created when a new asset is stored
+          //  - 200 OK when the asset already exists server-side (duplicate by checksum)
+          // Both mean "this file is safely backed up".
+          final isSuccess = statusCode != null && statusCode >= 200 && statusCode < 300;
+          if (isSuccess) {
             final completedItem = state.uploadItems[taskId];
             final uploadedBytes = completedItem?.fileSize ?? 0;
             final newCompleted = state.sessionCompletedCount + 1;
+            final newTotalBytes = state.sessionUploadedBytes + uploadedBytes;
+
+            // Log par-task COMPLETE : durée et débit effectif. Utile pour voir
+            // quels fichiers prennent anormalement longtemps (gros vidéos,
+            // PhotoKit lent, etc.).
+            if (completedItem?.firstSeenAt != null) {
+              final elapsed = DateTime.now().difference(completedItem!.firstSeenAt!);
+              final mb = uploadedBytes / (1024 * 1024);
+              final mbps = elapsed.inMilliseconds > 0
+                  ? (mb / (elapsed.inMilliseconds / 1000.0))
+                  : 0.0;
+              _logger.info(
+                "Task DONE (HTTP $statusCode): ${update.task.displayName} "
+                "— ${mb.toStringAsFixed(1)}MB in ${elapsed.inSeconds}s "
+                "(${mbps.toStringAsFixed(2)} MB/s)",
+              );
+            }
+
             state = state.copyWith(
               backupCount: state.backupCount + 1,
-              remainderCount: state.remainderCount - 1,
+              remainderCount: state.remainderCount > 0 ? state.remainderCount - 1 : 0,
               sessionCompletedCount: newCompleted,
-              sessionUploadedBytes: state.sessionUploadedBytes + uploadedBytes,
+              sessionUploadedBytes: newTotalBytes,
             );
-            // Log progress milestones to avoid log spam: every 50 files or first/last
-            if (newCompleted == 1 || newCompleted % 50 == 0 || newCompleted == state.sessionTotalCount) {
+            _pushByteSample(newTotalBytes);
+            _maybeTopUpQueue();
+            if (newCompleted == 1 || newCompleted % 50 == 0) {
               _logger.info(
-                "Upload progress: $newCompleted/${state.sessionTotalCount} done (${update.task.displayName})",
+                "Upload progress: $newCompleted/${state.displayedSessionTotal} done (${update.task.displayName})",
               );
             }
           } else {
             _logger.warning(
-              "Upload finished with unexpected status ${update.responseStatusCode} for ${update.task.displayName}",
+              "Task BAD STATUS: ${update.task.displayName} — HTTP $statusCode (treated as failure)",
             );
           }
         }
@@ -363,6 +825,14 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
         _removeUploadItem(update.task.taskId);
         break;
 
+      case TaskStatus.waitingToRetry:
+        // iOS NSURLSession a échoué une 1ère fois et programme un retry avec
+        // back-off exponentiel. Le task reste dans la queue mais sans progress
+        // pendant 30s/1min/2min/5min. Sans ce log, ça apparaissait juste comme
+        // "[-400%]" dans le dump du watchdog.
+        _logger.info("Upload WAITING_TO_RETRY: ${update.task.displayName} — iOS scheduled a retry (back-off)");
+        break;
+
       default:
         break;
     }
@@ -373,11 +843,21 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
     final filename = update.task.displayName;
     final progress = update.progress;
     final currentItem = state.uploadItems[taskId];
+
+    _ensureWatchdogRunning();
+
+    final now = DateTime.now();
+
     if (currentItem != null) {
       if (progress == kUploadStatusCanceled) {
         _removeUploadItem(update.task.taskId);
         return;
       }
+
+      // Détecte un "vrai" progress (bytes en mouvement) vs keepalive (même %).
+      // Sert au health-check pour identifier les tasks bloqués individuellement.
+      final hasRealProgress = progress > currentItem.progress + 0.001 || update.networkSpeed > 0;
+      final newLastProgressAt = hasRealProgress ? now : currentItem.lastProgressAt;
 
       state = state.copyWith(
         uploadItems: {
@@ -387,13 +867,25 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
                   progress: progress,
                   fileSize: update.expectedFileSize,
                   networkSpeedAsString: update.networkSpeedAsString,
+                  networkSpeed: update.networkSpeed,
+                  lastProgressAt: newLastProgressAt,
                 )
-              : currentItem.copyWith(progress: progress),
+              : currentItem.copyWith(
+                  progress: progress,
+                  networkSpeed: update.networkSpeed,
+                  lastProgressAt: newLastProgressAt,
+                ),
         },
       );
 
       return;
     }
+
+    // Premier progress event pour ce task — log "task started"
+    _logger.info(
+      "Task STARTED: $filename "
+      "(size=${(update.expectedFileSize / (1024 * 1024)).toStringAsFixed(1)}MB, taskId=$taskId)",
+    );
 
     state = state.copyWith(
       uploadItems: {
@@ -404,6 +896,8 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
           progress: progress,
           fileSize: update.expectedFileSize,
           networkSpeedAsString: update.networkSpeedAsString,
+          firstSeenAt: now,
+          lastProgressAt: now,
         ),
       },
     );
@@ -429,22 +923,78 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
   }
 
   Future<void> startBackup(String userId) async {
+    if (state.isStartingBackup) {
+      _logger.info("startBackup: already running, skipping concurrent call");
+      return;
+    }
     _logger.info("startBackup: queuing candidates (remainder=${state.remainderCount})");
-    state = state.copyWith(
-      error: BackupError.none,
-      sessionCompletedCount: 0,
-      sessionTotalCount: state.remainderCount,
-      sessionStartTime: DateTime.now(),
-      sessionUploadedBytes: 0,
-      isStartingBackup: true,
-      prepCandidateTotal: 0,
-      prepCandidateProcessed: 0,
-    );
+    _currentUserId = userId;
+    _ensureWatchdogRunning();
+    // Don't blindly set sessionTotalCount = remainderCount: if hashing hasn't
+    // produced candidates yet (remainder=0), we'd lock the total at 0 forever.
+    // Use the larger of (remainder, current total) so we never decrease it.
+    final newTotal = state.remainderCount > state.sessionTotalCount
+        ? state.remainderCount
+        : state.sessionTotalCount;
+
+    // If there's already a session in progress (handleBackupResume calling us
+    // after the queue temporarily drained between batches), DO NOT reset the
+    // visible counters — the user would see "0 / X" instead of their progress.
+    // Treat this as a "continue", not a fresh start.
+    final isFreshSession = state.sessionCompletedCount == 0 && state.sessionStartTime == null;
+    if (isFreshSession) {
+      _byteSamples.clear(); // fresh session → fresh speed window
+      state = state.copyWith(
+        error: BackupError.none,
+        sessionCompletedCount: 0,
+        sessionTotalCount: newTotal,
+        sessionStartTime: DateTime.now(),
+        sessionUploadedBytes: 0,
+        isStartingBackup: true,
+        prepCandidateTotal: 0,
+        prepCandidateProcessed: 0,
+      );
+    } else {
+      _logger.info(
+        "startBackup: continuing existing session (${state.sessionCompletedCount} files already uploaded) — counters preserved",
+      );
+      state = state.copyWith(
+        error: BackupError.none,
+        sessionTotalCount: newTotal,
+        isStartingBackup: true,
+        prepCandidateTotal: 0,
+        prepCandidateProcessed: 0,
+      );
+    }
     try {
-      await _uploadService.startBackup(userId, _updateEnqueueCount, _updatePrepProgress);
+      await _uploadService.startBackup(userId, _updateEnqueueCount, _updatePrepProgress, _updateUnreachable);
       _logger.info(
         "startBackup: enqueued=${state.enqueueCount}/${state.enqueueTotalCount} prepared=${state.prepCandidateProcessed}/${state.prepCandidateTotal}",
       );
+    } finally {
+      state = state.copyWith(isStartingBackup: false);
+    }
+  }
+
+  /// Top up the FileDownloader queue with newly-hashed candidates without
+  /// resetting session counters. Used while hashing is still in progress so
+  /// new candidates get enqueued as they become ready.
+  Future<void> continueBackup(String userId) async {
+    if (state.isStartingBackup) return; // already enqueuing
+    _logger.info("continueBackup: topping up queue (remainder=${state.remainderCount})");
+    _currentUserId = userId;
+    _ensureWatchdogRunning();
+    // Lazily initialize the session if it wasn't started via startBackup.
+    // Without this, sessionStartTime stays null → average speed is 0 → "— MB/s"
+    // shown forever even while bytes are flowing.
+    final initSession = state.sessionStartTime == null;
+    state = state.copyWith(
+      isStartingBackup: true,
+      sessionStartTime: initSession ? DateTime.now() : null,
+      sessionTotalCount: initSession ? state.remainderCount : null,
+    );
+    try {
+      await _uploadService.startBackup(userId, _updateEnqueueCount, _updatePrepProgress, _updateUnreachable);
     } finally {
       state = state.copyWith(isStartingBackup: false);
     }
@@ -456,6 +1006,12 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
 
   void _updatePrepProgress(int processed, int total) {
     state = state.copyWith(prepCandidateProcessed: processed, prepCandidateTotal: total);
+  }
+
+  void _updateUnreachable(int unreachable) {
+    if (state.unreachableCount != unreachable) {
+      state = state.copyWith(unreachableCount: unreachable);
+    }
   }
 
   Future<void> cancel() async {
@@ -479,26 +1035,42 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
     }
   }
 
+  bool _isResumingBackup = false;
+
   Future<void> handleBackupResume(String userId) async {
-    _logger.info("Resuming backup tasks...");
-    state = state.copyWith(error: BackupError.none);
-    final tasks = await _uploadService.getActiveTasks(kBackupGroup);
-    _logger.info("Found ${tasks.length} tasks");
-
-    if (tasks.isEmpty) {
-      // Start a new backup queue
-      _logger.info("Start a new backup queue");
-      return startBackup(userId);
+    // Guard against concurrent resume calls (iOS app lifecycle can fire resume
+    // multiple times in quick succession when foregrounding the app)
+    if (_isResumingBackup) {
+      _logger.info("handleBackupResume: already running, skipping");
+      return;
     }
+    _isResumingBackup = true;
+    try {
+      _currentUserId = userId;
+      _logger.info("Resuming backup tasks...");
+      state = state.copyWith(error: BackupError.none);
+      final tasks = await _uploadService.getActiveTasks(kBackupGroup);
+      _logger.info("Found ${tasks.length} tasks");
 
-    _logger.info("Tasks to resume: ${tasks.length}");
-    return _uploadService.resumeBackup();
+      if (tasks.isEmpty) {
+        // Start a new backup queue
+        _logger.info("Start a new backup queue");
+        return startBackup(userId);
+      }
+
+      _logger.info("Tasks to resume: ${tasks.length}");
+      return _uploadService.resumeBackup();
+    } finally {
+      _isResumingBackup = false;
+    }
   }
 
   @override
   void dispose() {
     _statusSubscription?.cancel();
     _progressSubscription?.cancel();
+    _stalledWatchdog?.cancel();
+    _retrySweeper?.cancel();
     super.dispose();
   }
 }

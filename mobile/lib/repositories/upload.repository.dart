@@ -53,8 +53,23 @@ class UploadRepository {
     return FileDownloader().database.deleteAllRecords(group: group);
   }
 
+  /// Delete a single task record after it has been processed. Used to keep
+  /// the FileDownloader localstore small — with thousands of tasks, iOS hits
+  /// the per-process file descriptor limit (errno 24, EMFILE) when trying to
+  /// scan all task records at once.
+  Future<void> deleteDatabaseRecord(String taskId) {
+    return FileDownloader().database.deleteRecordWithId(taskId);
+  }
+
   Future<bool> cancelAll(String group) {
     return FileDownloader().cancelAll(group: group);
+  }
+
+  /// Cancel a specific list of tasks by ID — used when individual uploads are
+  /// stuck (iOS suspended them and `start()` didn't revive them) so we can
+  /// force them back into the queue via continueBackup.
+  Future<void> cancelTasksWithIds(List<String> taskIds) {
+    return FileDownloader().cancelTasksWithIds(taskIds);
   }
 
   Future<int> reset(String group) {

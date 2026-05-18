@@ -251,6 +251,22 @@ class ActionNotifier extends Notifier<void> {
     }
   }
 
+  /// Comme [trashRemoteAndDeleteLocal] mais ne supprime PAS les fichiers
+  /// local-only (uniquement les copies locales des fichiers déjà sauvegardés
+  /// sur le serveur). Utilisé quand l'utilisateur choisit "Supprimer seulement
+  /// les sauvegardés" dans la dialog multi-sélection.
+  Future<ActionResult> trashRemoteAndDeleteLocalBackedUpOnly(ActionSource source) async {
+    final ids = _getOwnedRemoteIdsForSource(source);
+    final localIds = _getLocalIdsForSource(source, ignoreLocalOnly: true);
+    try {
+      await _service.trashRemoteAndDeleteLocal(ids, localIds);
+      return ActionResult(count: ids.length + localIds.length, success: true);
+    } catch (error, stack) {
+      _logger.severe('Failed to delete assets (backed up only)', error, stack);
+      return ActionResult(count: ids.length, success: false, error: error.toString());
+    }
+  }
+
   Future<ActionResult> deleteRemoteAndLocal(ActionSource source) async {
     final ids = _getOwnedRemoteIdsForSource(source);
     final localIds = _getLocalIdsForSource(source);

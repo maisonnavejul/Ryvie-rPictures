@@ -1,10 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:auto_route/auto_route.dart';
-import 'package:crypto/crypto.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -17,9 +14,7 @@ import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/theme_extensions.dart';
 import 'package:immich_mobile/providers/auth.provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
-import 'package:immich_mobile/providers/backup/backup.provider.dart';
 import 'package:immich_mobile/providers/gallery_permission.provider.dart';
-import 'package:immich_mobile/providers/oauth.provider.dart';
 import 'package:immich_mobile/providers/server_info.provider.dart';
 import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/routing/router.dart';
@@ -32,7 +27,6 @@ import 'package:immich_mobile/widgets/common/immich_toast.dart';
 import 'package:immich_mobile/widgets/forms/login/email_input.dart';
 import 'package:immich_mobile/widgets/forms/login/loading_icon.dart';
 import 'package:immich_mobile/widgets/forms/login/login_button.dart';
-import 'package:immich_mobile/widgets/forms/login/o_auth_login_button.dart';
 import 'package:immich_mobile/widgets/forms/login/password_input.dart';
 import 'package:immich_mobile/widgets/forms/login/server_endpoint_input.dart';
 import 'package:immich_mobile/services/smart_url_selector.service.dart';
@@ -40,7 +34,6 @@ import 'package:immich_mobile/providers/connection_status.provider.dart';
 import 'package:logging/logging.dart';
 import 'package:openapi/api.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 class LoginForm extends HookConsumerWidget {
   LoginForm({super.key});
@@ -110,9 +103,7 @@ class LoginForm extends HookConsumerWidget {
     final serverEndpointFocusNode = useFocusNode();
     final isLoading = useState<bool>(false);
     final isLoadingServer = useState<bool>(false);
-    final isOauthEnable = useState<bool>(false);
     final isPasswordLoginEnable = useState<bool>(false);
-    final oAuthButtonLabel = useState<String>('OAuth');
     final logoAnimationController = useAnimationController(duration: const Duration(seconds: 60))..repeat();
     final serverInfo = ref.watch(serverInfoProvider);
     final warningMessage = useState<String?>(null);
@@ -159,11 +150,8 @@ class LoginForm extends HookConsumerWidget {
 
         final serverInfo = ref.read(serverInfoProvider);
         final features = serverInfo.serverFeatures;
-        final config = serverInfo.serverConfig;
 
-        isOauthEnable.value = features.oauthEnabled;
         isPasswordLoginEnable.value = features.passwordLogin;
-        oAuthButtonLabel.value = config.oauthButtonText.isNotEmpty ? config.oauthButtonText : 'OAuth';
 
         serverEndpoint.value = endpoint;
       } on ApiException catch (e) {
@@ -173,7 +161,6 @@ class LoginForm extends HookConsumerWidget {
           toastType: ToastType.error,
           gravity: ToastGravity.TOP,
         );
-        isOauthEnable.value = false;
         isPasswordLoginEnable.value = true;
         isLoadingServer.value = false;
       } on HandshakeException {
@@ -183,7 +170,6 @@ class LoginForm extends HookConsumerWidget {
           toastType: ToastType.error,
           gravity: ToastGravity.TOP,
         );
-        isOauthEnable.value = false;
         isPasswordLoginEnable.value = true;
         isLoadingServer.value = false;
       } catch (e) {
@@ -193,7 +179,6 @@ class LoginForm extends HookConsumerWidget {
           toastType: ToastType.error,
           gravity: ToastGravity.TOP,
         );
-        isOauthEnable.value = false;
         isPasswordLoginEnable.value = true;
         isLoadingServer.value = false;
       }
@@ -332,116 +317,6 @@ class LoginForm extends HookConsumerWidget {
       }
     }
 
-    String generateRandomString(int length) {
-      const chars = 'AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz1234567890';
-      final random = Random.secure();
-      return String.fromCharCodes(Iterable.generate(length, (_) => chars.codeUnitAt(random.nextInt(chars.length))));
-    }
-
-    List<int> randomBytes(int length) {
-      final random = Random.secure();
-      return List<int>.generate(length, (i) => random.nextInt(256));
-    }
-
-    /// Per specification, the code verifier must be 43-128 characters long
-    /// and consist of characters [A-Z, a-z, 0-9, "-", ".", "_", "~"]
-    /// https://datatracker.ietf.org/doc/html/rfc7636#section-4.1
-    String randomCodeVerifier() {
-      return base64Url.encode(randomBytes(42));
-    }
-
-    Future<String> generatePKCECodeChallenge(String codeVerifier) async {
-      var bytes = utf8.encode(codeVerifier);
-      var digest = sha256.convert(bytes);
-      return base64Url.encode(digest.bytes).replaceAll('=', '');
-    }
-
-    oAuthLogin() async {
-      var oAuthService = ref.watch(oAuthServiceProvider);
-      String? oAuthServerUrl;
-
-      final state = generateRandomString(32);
-
-      final codeVerifier = randomCodeVerifier();
-      final codeChallenge = await generatePKCECodeChallenge(codeVerifier);
-
-      try {
-        oAuthServerUrl = await oAuthService.getOAuthServerUrl(
-          sanitizeUrl(serverEndpointController.text),
-          state,
-          codeChallenge,
-        );
-
-        isLoading.value = true;
-
-        // Invalidate all api repository provider instance to take into account new access token
-        invalidateAllApiRepositoryProviders(ref);
-      } catch (error, stack) {
-        log.severe('Error getting OAuth server Url: $error', stack);
-
-        ImmichToast.show(
-          context: context,
-          msg: "login_form_failed_get_oauth_server_config".tr(),
-          toastType: ToastType.error,
-          gravity: ToastGravity.TOP,
-        );
-        isLoading.value = false;
-        return;
-      }
-
-      if (oAuthServerUrl != null) {
-        try {
-          final loginResponseDto = await oAuthService.oAuthLogin(oAuthServerUrl, state, codeVerifier);
-
-          if (loginResponseDto == null) {
-            return;
-          }
-
-          log.info("Finished OAuth login with response: ${loginResponseDto.userEmail}");
-
-          final isSuccess = await ref
-              .watch(authProvider.notifier)
-              .saveAuthInfo(accessToken: loginResponseDto.accessToken);
-
-          if (isSuccess) {
-            isLoading.value = false;
-            final permission = ref.watch(galleryPermissionNotifier);
-            final isBeta = Store.isBetaTimelineEnabled;
-            if (!isBeta && (permission.isGranted || permission.isLimited)) {
-              unawaited(ref.watch(backupProvider.notifier).resumeBackup());
-            }
-            if (isBeta) {
-              await ref.read(galleryPermissionNotifier.notifier).requestGalleryPermission();
-              unawaited(handleSyncFlow());
-              unawaited(context.replaceRoute(const TabShellRoute()));
-              return;
-            }
-            unawaited(context.replaceRoute(const TabControllerRoute()));
-          }
-        } catch (error, stack) {
-          log.severe('Error logging in with OAuth: $error', stack);
-
-          ImmichToast.show(
-            context: context,
-            msg: error.toString(),
-            toastType: ToastType.error,
-            gravity: ToastGravity.TOP,
-          );
-        } finally {
-          isLoading.value = false;
-        }
-      } else {
-        ImmichToast.show(
-          context: context,
-          msg: "login_form_failed_get_oauth_server_disable".tr(),
-          toastType: ToastType.info,
-          gravity: ToastGravity.TOP,
-        );
-        isLoading.value = false;
-        return;
-      }
-    }
-
     buildSelectServer() {
       const buttonRadius = 25.0;
       return Column(
@@ -550,22 +425,9 @@ class LoginForm extends HookConsumerWidget {
                     children: [
                       const SizedBox(height: 18),
                       if (isPasswordLoginEnable.value) LoginButton(onPressed: login),
-                      if (isOauthEnable.value) ...[
-                        if (isPasswordLoginEnable.value)
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                            child: Divider(color: context.isDarkTheme ? Colors.white : Colors.black),
-                          ),
-                        OAuthLoginButton(
-                          serverEndpointController: serverEndpointController,
-                          buttonLabel: oAuthButtonLabel.value,
-                          isLoading: isLoading,
-                          onPressed: oAuthLogin,
-                        ),
-                      ],
                     ],
                   ),
-            if (!isOauthEnable.value && !isPasswordLoginEnable.value) Center(child: const Text('login_disabled').tr()),
+            if (!isPasswordLoginEnable.value) Center(child: const Text('login_disabled').tr()),
             const SizedBox(height: 12),
             TextButton.icon(
               icon: const Icon(Icons.arrow_back),

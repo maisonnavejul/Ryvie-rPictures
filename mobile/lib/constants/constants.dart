@@ -47,6 +47,9 @@ const List<(String, String)> kWidgetNames = [
 
 const double kUploadStatusFailed = -1.0;
 const double kUploadStatusCanceled = -2.0;
+/// Valeur de `progress` retournée par background_downloader quand iOS a
+/// programmé un retry avec back-off après un premier échec.
+const double kUploadStatusWaitingToRetry = -4.0;
 
 const int kMinMonthsToEnableScrubberSnap = 12;
 

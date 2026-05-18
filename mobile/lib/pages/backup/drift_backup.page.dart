@@ -47,14 +47,23 @@ class _DriftBackupPageState extends ConsumerState<DriftBackupPage> {
       await ref.read(driftBackupProvider.notifier).getBackupStatus(currentUser.id);
 
       // Skip if a sync is already running (e.g. triggered by the auto-backup toggle)
-      if (!mounted || ref.read(driftBackupProvider).isSyncing) return;
+      if (mounted && !ref.read(driftBackupProvider).isSyncing) {
+        ref.read(driftBackupProvider.notifier).updateSyncing(true);
+        syncSuccess = await ref.read(backgroundSyncProvider).syncRemote();
 
-      ref.read(driftBackupProvider.notifier).updateSyncing(true);
-      syncSuccess = await ref.read(backgroundSyncProvider).syncRemote();
+        if (!mounted) return;
+        ref.read(driftBackupProvider.notifier).updateSyncing(false);
+        await ref.read(driftBackupProvider.notifier).getBackupStatus(currentUser.id);
+      }
 
+      // After landing on the page, top up the upload queue with any candidates
+      // that are already hashed and ready but not yet enqueued (e.g. when the
+      // initial toggle-triggered startBackup ran before hashing produced files).
       if (!mounted) return;
-      ref.read(driftBackupProvider.notifier).updateSyncing(false);
-      await ref.read(driftBackupProvider.notifier).getBackupStatus(currentUser.id);
+      final s = ref.read(driftBackupProvider);
+      if (s.remainderCount > 0 && !s.isStartingBackup) {
+        await ref.read(driftBackupProvider.notifier).continueBackup(currentUser.id);
+      }
     });
   }
 
@@ -283,8 +292,16 @@ class _RemainderCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final remainderCount = ref.watch(driftBackupProvider.select((p) => p.remainderCount));
+    final effectiveRemainder = ref.watch(driftBackupProvider.select((p) => p.effectiveRemainderCount));
+    final unreachableCount = ref.watch(driftBackupProvider.select((p) => p.unreachableCount));
     final syncStatus = ref.watch(syncStatusProvider);
+    final isAllDone = effectiveRemainder == 0;
+
+    final subtitle = isAllDone
+        ? (unreachableCount > 0
+            ? 'Tout est sauvegardé — $unreachableCount fichier${unreachableCount > 1 ? 's' : ''} non disponible${unreachableCount > 1 ? 's' : ''} (iCloud)'
+            : 'Tout est sauvegardé')
+        : "backup_controller_page_remainder_sub".t(context: context);
 
     return Card(
       shape: RoundedRectangleBorder(
@@ -302,8 +319,10 @@ class _RemainderCard extends ConsumerWidget {
             subtitle: Padding(
               padding: const EdgeInsets.only(top: 4.0, right: 18.0),
               child: Text(
-                "backup_controller_page_remainder_sub".t(context: context),
-                style: context.textTheme.bodyMedium?.copyWith(color: context.colorScheme.onSurfaceSecondary),
+                subtitle,
+                style: context.textTheme.bodyMedium?.copyWith(
+                  color: isAllDone ? context.colorScheme.primary : context.colorScheme.onSurfaceSecondary,
+                ),
               ),
             ),
             trailing: Column(
@@ -312,9 +331,11 @@ class _RemainderCard extends ConsumerWidget {
                 Stack(
                   children: [
                     Text(
-                      remainderCount.toString(),
+                      isAllDone ? '✓' : effectiveRemainder.toString(),
                       style: context.textTheme.titleLarge?.copyWith(
-                        color: context.colorScheme.onSurface.withAlpha(syncStatus.isRemoteSyncing ? 50 : 255),
+                        color: isAllDone
+                            ? context.colorScheme.primary
+                            : context.colorScheme.onSurface.withAlpha(syncStatus.isRemoteSyncing ? 50 : 255),
                       ),
                     ),
                     if (syncStatus.isRemoteSyncing)
@@ -385,6 +406,15 @@ class _UploadProgressCard extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
+    // Si tout est sauvegardé (que des fichiers iCloud restent) ET qu'il n'y a
+    // aucun upload réel en cours, on masque la card "Préparation..." pour ne
+    // pas contredire la card "Tout est sauvegardé" qui s'affiche au dessus.
+    // continueBackup tourne quand même en boucle (retry des iCloud) mais
+    // l'utilisateur n'a pas à le voir.
+    if (backupState.effectiveRemainderCount == 0 && uploadItems.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
     final isSyncing = backupState.isSyncing && uploadItems.isEmpty && backupState.enqueueTotalCount == 0;
     final isStartingNoEnqueueYet = backupState.isStartingBackup &&
         backupState.enqueueTotalCount == 0 &&
@@ -394,7 +424,7 @@ class _UploadProgressCard extends ConsumerWidget {
     final isLooseProgress = isSyncing || isStartingNoEnqueueYet || isEnqueuing;
 
     final completed = backupState.sessionCompletedCount;
-    final total = backupState.sessionTotalCount;
+    final total = backupState.displayedSessionTotal;
     final progress = backupState.sessionProgress;
     final eta = backupState.estimatedTimeRemaining;
 
@@ -415,6 +445,23 @@ class _UploadProgressCard extends ConsumerWidget {
     } else {
       headerLabel = 'Upload en cours';
     }
+
+    // Sort active uploads so files actually progressing come first
+    // (highest progress > 0 first, then progress 0 last). This makes the list show
+    // what is really uploading rather than items stuck at 0%.
+    final sortedUploads = [...activeUploads]..sort((a, b) {
+      final aActive = a.networkSpeed > 0 || a.progress > 0;
+      final bActive = b.networkSpeed > 0 || b.progress > 0;
+      if (aActive && !bActive) return -1;
+      if (!aActive && bActive) return 1;
+      // Both active or both inactive: higher progress first
+      return b.progress.compareTo(a.progress);
+    });
+
+    // Average MB/s since the upload session started — stable indicator that
+    // doesn't flicker to 0 when an individual task pauses momentarily.
+    final double averageSpeedMBs = backupState.sessionAverageSpeedMBs;
+    final hasSpeed = averageSpeedMBs > 0.001;
 
     return Card(
       margin: const EdgeInsets.only(top: 8),
@@ -477,117 +524,126 @@ class _UploadProgressCard extends ConsumerWidget {
                     ),
             ),
             if (!isLooseProgress) ...[
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Text(
-                  '${(progress * 100).toStringAsFixed(1)}%',
-                  style: context.textTheme.labelMedium?.copyWith(
-                    color: context.primaryColor,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if (backupState.sessionUploadedBytes > 0) ...[
-                  const SizedBox(width: 8),
+              const SizedBox(height: 8),
+              Row(
+                children: [
                   Text(
-                    formatHumanReadableBytes(backupState.sessionUploadedBytes, 1),
+                    '${(progress * 100).toStringAsFixed(1)}%',
+                    style: context.textTheme.labelMedium?.copyWith(
+                      color: context.primaryColor,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (backupState.sessionUploadedBytes > 0) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      formatHumanReadableBytes(backupState.sessionUploadedBytes, 1),
+                      style: context.textTheme.labelMedium?.copyWith(
+                        color: context.colorScheme.onSurface.withValues(alpha: 0.6),
+                      ),
+                    ),
+                  ],
+                  const Spacer(),
+                  Icon(
+                    Icons.speed,
+                    size: 14,
+                    color: context.colorScheme.onSurface.withValues(alpha: 0.6),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    hasSpeed ? '${averageSpeedMBs.toStringAsFixed(1)} MB/s' : '— MB/s',
                     style: context.textTheme.labelMedium?.copyWith(
                       color: context.colorScheme.onSurface.withValues(alpha: 0.6),
                     ),
                   ),
-                ],
-                const Spacer(),
-                if (eta != null)
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.timer_outlined,
-                        size: 14,
+                  const SizedBox(width: 12),
+                  if (eta != null) ...[
+                    Icon(
+                      Icons.timer_outlined,
+                      size: 14,
+                      color: context.colorScheme.onSurface.withValues(alpha: 0.6),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '~${_formatDuration(eta)}',
+                      style: context.textTheme.labelMedium?.copyWith(
                         color: context.colorScheme.onSurface.withValues(alpha: 0.6),
                       ),
-                      const SizedBox(width: 4),
-                      Text(
-                        '~${_formatDuration(eta)}',
-                        style: context.textTheme.labelMedium?.copyWith(
-                          color: context.colorScheme.onSurface.withValues(alpha: 0.6),
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
-            ),
-            if (failedCount > 0) ...[
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Icon(Icons.error_outline, size: 14, color: context.colorScheme.error),
-                  const SizedBox(width: 4),
-                  Text(
-                    '$failedCount fichier${failedCount > 1 ? 's' : ''} en erreur',
-                    style: context.textTheme.labelMedium?.copyWith(color: context.colorScheme.error),
-                  ),
+                    ),
+                  ],
                 ],
               ),
-            ],
-            if (activeUploads.isNotEmpty) ...[
-              const Divider(height: 20),
-              ...activeUploads.take(3).map((item) => Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Row(
+              if (failedCount > 0) ...[
+                const SizedBox(height: 8),
+                Row(
                   children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                    Icon(Icons.error_outline, size: 14, color: context.colorScheme.error),
+                    const SizedBox(width: 4),
+                    Text(
+                      '$failedCount fichier${failedCount > 1 ? 's' : ''} en erreur',
+                      style: context.textTheme.labelMedium?.copyWith(color: context.colorScheme.error),
+                    ),
+                  ],
+                ),
+              ],
+              if (sortedUploads.isNotEmpty) ...[
+                const Divider(height: 20),
+                ...sortedUploads.take(3).map((item) => Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              path.basename(item.filename),
+                              style: context.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w500),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 4),
+                            ClipRRect(
+                              borderRadius: const BorderRadius.all(Radius.circular(4)),
+                              child: LinearProgressIndicator(
+                                value: item.progress.clamp(0.0, 1.0),
+                                minHeight: 4,
+                                backgroundColor: context.colorScheme.surfaceContainerHighest,
+                                color: context.colorScheme.secondary,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
                           Text(
-                            path.basename(item.filename),
-                            style: context.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w500),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                            '${(item.progress * 100).clamp(0, 100).toStringAsFixed(0)}%',
+                            style: context.textTheme.labelSmall?.copyWith(fontWeight: FontWeight.bold),
                           ),
-                          const SizedBox(height: 4),
-                          ClipRRect(
-                            borderRadius: const BorderRadius.all(Radius.circular(4)),
-                            child: LinearProgressIndicator(
-                              value: item.progress.clamp(0.0, 1.0),
-                              minHeight: 4,
-                              backgroundColor: context.colorScheme.surfaceContainerHighest,
-                              color: context.colorScheme.secondary,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          '${(item.progress * 100).clamp(0, 100).toStringAsFixed(0)}%',
-                          style: context.textTheme.labelSmall?.copyWith(fontWeight: FontWeight.bold),
-                        ),
-                        if (item.networkSpeedAsString.isNotEmpty)
                           Text(
-                            item.networkSpeedAsString,
+                            item.networkSpeed > 0 ? item.networkSpeedAsString : '— MB/s',
                             style: context.textTheme.labelSmall?.copyWith(
                               color: context.colorScheme.onSurface.withValues(alpha: 0.5),
                               fontSize: 10,
                             ),
                           ),
-                      ],
-                    ),
-                  ],
-                ),
-              )),
-              if (activeUploads.length > 3)
-                Text(
-                  '+${activeUploads.length - 3} autre${activeUploads.length - 3 > 1 ? 's' : ''}...',
-                  style: context.textTheme.labelSmall?.copyWith(
-                    color: context.colorScheme.onSurface.withValues(alpha: 0.5),
+                        ],
+                      ),
+                    ],
                   ),
-                ),
+                )),
+                if (sortedUploads.length > 3)
+                  Text(
+                    '+${sortedUploads.length - 3} autre${sortedUploads.length - 3 > 1 ? 's' : ''}...',
+                    style: context.textTheme.labelSmall?.copyWith(
+                      color: context.colorScheme.onSurface.withValues(alpha: 0.5),
+                    ),
+                  ),
+              ],
             ],
-            ], // end if (!isPreparing && !isEnqueuing)
           ],
         ),
       ),
@@ -604,6 +660,7 @@ class _PreparingStatus extends ConsumerStatefulWidget {
 
 class _PreparingStatusState extends ConsumerState {
   Timer? _pollingTimer;
+  int _previousReadyCount = 0;
 
   @override
   void dispose() {
@@ -615,17 +672,41 @@ class _PreparingStatusState extends ConsumerState {
     if (_pollingTimer != null) return;
 
     _pollingTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
+      if (!mounted) {
+        timer.cancel();
+        _pollingTimer = null;
+        return;
+      }
       final currentUser = ref.read(currentUserProvider);
-      if (currentUser != null && mounted) {
-        await ref.read(driftBackupProvider.notifier).getBackupStatus(currentUser.id);
+      if (currentUser == null) {
+        timer.cancel();
+        _pollingTimer = null;
+        return;
+      }
 
-        // Stop polling if processing count reaches 0
-        final updatedProcessingCount = ref.read(driftBackupProvider.select((p) => p.processingCount));
-        if (updatedProcessingCount == 0) {
-          timer.cancel();
-          _pollingTimer = null;
-        }
+      await ref.read(driftBackupProvider.notifier).getBackupStatus(currentUser.id);
+
+      // The widget may have been disposed during the await above
+      if (!mounted) {
+        timer.cancel();
+        _pollingTimer = null;
+        return;
+      }
+
+      final state = ref.read(driftBackupProvider);
+      final readyCount = state.remainderCount - state.processingCount;
+
+      // If hashing has produced new ready-to-upload candidates, top up the queue
+      // so they actually start uploading instead of waiting for the next manual trigger.
+      if (readyCount > _previousReadyCount && !state.isStartingBackup) {
+        _previousReadyCount = readyCount;
+        unawaited(ref.read(driftBackupProvider.notifier).continueBackup(currentUser.id));
       } else {
+        _previousReadyCount = readyCount;
+      }
+
+      // Stop polling if processing count reaches 0
+      if (state.processingCount == 0) {
         timer.cancel();
         _pollingTimer = null;
       }
@@ -637,6 +718,7 @@ class _PreparingStatusState extends ConsumerState {
     final syncStatus = ref.watch(syncStatusProvider);
     final remainderCount = ref.watch(driftBackupProvider.select((p) => p.remainderCount));
     final processingCount = ref.watch(driftBackupProvider.select((p) => p.processingCount));
+    final effectiveRemainder = ref.watch(driftBackupProvider.select((p) => p.effectiveRemainderCount));
     final readyForUploadCount = remainderCount - processingCount;
 
     ref.listen<int>(driftBackupProvider.select((p) => p.processingCount), (previous, next) {
@@ -648,7 +730,11 @@ class _PreparingStatusState extends ConsumerState {
       }
     });
 
-    if (!syncStatus.isHashing) {
+    // Masquer la card "Préparation..." quand soit le hashing est terminé, soit
+    // qu'il n'y a plus rien à uploader (cas où le hashing tourne encore après
+    // que tout a été sauvegardé) — sinon on a la contradiction "Tout est
+    // sauvegardé" + animation Préparation en dessous.
+    if (!syncStatus.isHashing || effectiveRemainder == 0) {
       return const SizedBox.shrink();
     }
 

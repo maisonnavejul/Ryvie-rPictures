@@ -9,6 +9,7 @@ import 'package:immich_mobile/presentation/widgets/action_buttons/base_action_bu
 import 'package:immich_mobile/presentation/widgets/asset_viewer/asset_viewer.state.dart';
 import 'package:immich_mobile/providers/infrastructure/action.provider.dart';
 import 'package:immich_mobile/providers/timeline/multiselect.provider.dart';
+import 'package:immich_mobile/widgets/asset_grid/delete_dialog.dart';
 import 'package:immich_mobile/widgets/common/immich_toast.dart';
 
 /// This delete action has the following behavior:
@@ -25,7 +26,44 @@ class DeleteActionButton extends ConsumerWidget {
       return;
     }
 
-    if (showConfirmation) {
+    // En multi-sélection, on regarde si la sélection contient des photos
+    // locales (locales-pures OU mergées) pour proposer un prompt cohérent
+    // avec le comportement single-photo : "Que faire des fichiers locaux ?".
+    final multiselect = ref.read(multiSelectProvider);
+    final isMultiSelect = source == ActionSource.timeline;
+    final hasLocalContent = multiselect.hasLocal || multiselect.hasMerged;
+
+    if (isMultiSelect && hasLocalContent) {
+      // Reproduit le prompt du single-photo (DeleteLocalOnlyDialog) :
+      //  - Annuler
+      //  - Supprimer du serveur + supprimer en local SEULEMENT les sauvegardées
+      //    (les local-only restent intactes)
+      //  - Tout supprimer (force) : serveur + local, y compris local-only
+      final choice = await showDialog<bool>(
+        context: context,
+        builder: (context) => DeleteLocalOnlyDialog(onDeleteLocal: (_) {}),
+      );
+      if (choice == null) return; // annulé
+      if (choice) {
+        // Sauvegardées seulement : trash remote + supprime local des mergées,
+        // laisse les local-only tranquilles.
+        final result = await ref.read(actionProvider.notifier).trashRemoteAndDeleteLocalBackedUpOnly(source);
+        ref.read(multiSelectProvider.notifier).reset();
+        if (context.mounted) {
+          ImmichToast.show(
+            context: context,
+            msg: result.success
+                ? 'delete_action_prompt'.t(context: context, args: {'count': result.count.toString()})
+                : 'scaffold_body_error_occurred'.t(context: context),
+            gravity: ToastGravity.BOTTOM,
+            toastType: result.success ? ToastType.success : ToastType.error,
+          );
+        }
+        return;
+      }
+      // choice == false → force delete : on tombe sur le flux normal qui
+      // supprime tout (server + local).
+    } else if (showConfirmation) {
       final confirm = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(

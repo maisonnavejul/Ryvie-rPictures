@@ -17,6 +17,12 @@ class HashService {
   final bool Function()? _cancelChecker;
   final _log = Logger('HashService');
 
+  /// Asset IDs that have failed hashing during this app session — typically
+  /// iCloud-optimised originals that PhotoKit refuses to return locally.
+  /// Skipping them prevents the hash loop from spamming the logs and burning
+  /// CPU re-attempting the same files on every sync.
+  static final Set<String> _failedAssetIds = <String>{};
+
   HashService({
     required DriftLocalAlbumRepository localAlbumRepository,
     required DriftLocalAssetRepository localAssetRepository,
@@ -67,11 +73,19 @@ class HashService {
   /// [LocalAssetHashEntity] by local id. Only missing entries are newly hashed and added to the DB.
   Future<void> _hashAssets(LocalAlbum album, List<LocalAsset> assetsToHash) async {
     final toHash = <String, LocalAsset>{};
+    int skipped = 0;
 
     for (final asset in assetsToHash) {
       if (isCancelled) {
         _log.warning("Hashing cancelled. Stopped processing assets.");
         return;
+      }
+
+      // Skip assets that already failed in this session (e.g. iCloud-only originals).
+      // They'll be retried on next app launch.
+      if (_failedAssetIds.contains(asset.id)) {
+        skipped++;
+        continue;
       }
 
       toHash[asset.id] = asset;
@@ -82,6 +96,10 @@ class HashService {
     }
 
     await _processBatch(album, toHash);
+
+    if (skipped > 0) {
+      _log.fine("Skipped $skipped previously-failed assets in album '${album.name}'");
+    }
   }
 
   /// Processes a batch of assets.
@@ -111,11 +129,25 @@ class HashService {
       final hashResult = hashResults[i];
       if (hashResult.hash != null) {
         hashed[hashResult.assetId] = hashResult.hash!;
+        // In case the asset was previously failed (e.g. iCloud downloaded later) — clear the skip flag
+        _failedAssetIds.remove(hashResult.assetId);
       } else {
+        // Remember the failure so we don't retry it in the same session
+        _failedAssetIds.add(hashResult.assetId);
         final asset = toHash[hashResult.assetId];
-        _log.warning(
-          "Failed to hash asset with id: ${hashResult.assetId}, name: ${asset?.name}, createdAt: ${asset?.createdAt}, from album: ${album.name}. Error: ${hashResult.error ?? "unknown"}",
-        );
+        final errorMsg = hashResult.error ?? "unknown";
+        // PHPhotosErrorDomain -1 means "asset not available locally" (iCloud-optimised storage).
+        // This is expected and not actionable — log at fine level to avoid spamming logs.
+        final isExpectedICloudError = errorMsg.contains("PHPhotosErrorDomain");
+        if (isExpectedICloudError) {
+          _log.fine(
+            "Asset not locally available (iCloud): ${asset?.name} [${hashResult.assetId}]",
+          );
+        } else {
+          _log.warning(
+            "Failed to hash asset with id: ${hashResult.assetId}, name: ${asset?.name}, createdAt: ${asset?.createdAt}, from album: ${album.name}. Error: $errorMsg",
+          );
+        }
       }
     }
 

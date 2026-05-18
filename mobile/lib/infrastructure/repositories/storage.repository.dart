@@ -1,7 +1,6 @@
 import 'dart:io';
 
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
-import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:logging/logging.dart';
 import 'package:photo_manager/photo_manager.dart';
 
@@ -106,19 +105,11 @@ class StorageRepository {
     try {
       await PhotoManager.clearFileCache();
     } catch (error, stackTrace) {
-      log.warning("Error clearing cache", error, stackTrace);
+      log.warning("Error clearing PhotoManager cache", error, stackTrace);
     }
-
-    if (!CurrentPlatform.isIOS) {
-      return;
-    }
-
-    try {
-      if (await Directory.systemTemp.exists()) {
-        await Directory.systemTemp.delete(recursive: true);
-      }
-    } catch (error, stackTrace) {
-      log.warning("Error deleting temporary directory", error, stackTrace);
-    }
+    // NOTE: previously this also deleted Directory.systemTemp recursively on iOS,
+    // but NSTemporaryDirectory is shared with FileDownloader/PhotoKit and deleting it
+    // mid-flight wipes the source files of in-progress uploads, leaving them stuck at 0%.
+    // PhotoManager.clearFileCache() is sufficient.
   }
 }

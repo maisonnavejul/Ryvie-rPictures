@@ -1182,7 +1182,7 @@
   "id": "ID",
   "idle": "Inactif",
   "ignore_icloud_photos": "Ignorer les photos iCloud",
-  "ignore_icloud_photos_description": "Les photos stockées sur iCloud ne seront pas envoyées sur le serveur Immich",
+  "ignore_icloud_photos_description": "Les photos stockées sur iCloud ne seront pas envoyées sur le serveur rPictures",
   "image": "Image",
   "image_alt_text_date": "{isVideo, select, true {Video} other {Image}} prise le {date}",
   "image_alt_text_date_1_person": "{isVideo, select, true {Video} other {Image}} prise avec {person1} le {date}",

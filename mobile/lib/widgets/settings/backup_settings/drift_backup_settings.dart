@@ -38,6 +38,19 @@ class DriftBackupSettings extends ConsumerWidget {
         ),
         const _UseWifiForUploadVideosButton(),
         const _UseWifiForUploadPhotosButton(),
+        if (CurrentPlatform.isIOS) ...[
+          const Divider(),
+          Padding(
+            padding: const EdgeInsets.only(left: 16.0),
+            child: Text(
+              "iCloud".toUpperCase(),
+              style: context.textTheme.labelSmall?.copyWith(
+                color: context.colorScheme.onSurface.withValues(alpha: 0.7),
+              ),
+            ),
+          ),
+          const _IgnoreIcloudPhotosButton(),
+        ],
         if (CurrentPlatform.isAndroid) ...[
           const Divider(),
           Padding(
@@ -345,6 +358,19 @@ class _UseWifiForUploadPhotosButton extends ConsumerWidget {
       appSettingsEnum: AppSettingsEnum.useCellularForUploadPhotos,
       titleKey: "network_requirement_photos_upload",
       subtitleKey: "network_requirement_photos_upload_sub",
+    );
+  }
+}
+
+class _IgnoreIcloudPhotosButton extends ConsumerWidget {
+  const _IgnoreIcloudPhotosButton();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return const _SettingsSwitchTile(
+      appSettingsEnum: AppSettingsEnum.ignoreIcloudAssets,
+      titleKey: "ignore_icloud_photos",
+      subtitleKey: "ignore_icloud_photos_description",
     );
   }
 }

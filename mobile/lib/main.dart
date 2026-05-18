@@ -102,12 +102,14 @@ Future<void> initApp() async {
 
   initializeTimeZones();
 
-  // Initialize the file downloader
+  // Initialize the file downloader.
+  // holdingQueue: (maxConcurrent, maxConcurrentByHost, maxConcurrentByGroup)
+  // - On iOS, NSURLSession.background already caps at 4 connections per host, so we
+  //   match that here to avoid filling the holding queue with idle waiting tasks.
+  // - Lower numbers also help avoid the iOS file descriptor limit (EMFILE) on the
+  //   FileDownloader localstore when there are thousands of queued tasks.
   await FileDownloader().configure(
-    // maxConcurrent: 6, maxConcurrentByHost(server):6, maxConcurrentByGroup: 3
-
-    // On Android, if files are larger than 256MB, run in foreground service
-    globalConfig: [(Config.holdingQueue, (6, 6, 6)), (Config.runInForegroundIfFileLargerThan, 256)],
+    globalConfig: [(Config.holdingQueue, (4, 4, 4)), (Config.runInForegroundIfFileLargerThan, 256)],
   );
 
   await FileDownloader().trackTasksInGroup(kDownloadGroupLivePhoto, markDownloadedComplete: false);
