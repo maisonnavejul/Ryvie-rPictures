@@ -228,19 +228,18 @@ class DriftBackupState {
               uploadItems.isNotEmpty) &&
           !isCanceling;
 
-  /// Dynamic total = files done this session + files still reachable.
-  /// Excludes unreachable files (iCloud-only) so the "Upload en cours X / Y"
-  /// stays coherent with the "Restant" card.
+  /// Total affiché dans "Upload en cours X / Y" = ce qui a été uploadé +
+  /// ce qui reste réellement à faire (sans doublons, sans iCloud-only).
   ///
-  /// Important: on retire AUSSI les unreachables de sessionTotalCount.
-  /// Sinon, après une session où des fichiers iCloud ont été comptés dans le
-  /// total et qu'une nouvelle photo arrive, on aurait "1/12" au lieu de "1/1"
-  /// (sessionTotalCount=12 mais 11 sont en réalité non-uploadables).
+  /// Garantie : quand `X == Y`, le backup est VRAIMENT terminé. Pendant
+  /// le hashing, Y peut converger depuis une valeur haute (estimation de
+  /// départ) vers la valeur finale (= nombre réel de fichiers à uploader,
+  /// après identification des doublons et des iCloud-only).
+  ///
+  /// On retire `unreachableCount` (iCloud-only) pour rester cohérent avec
+  /// la card "Restant" qui les exclut aussi.
   int get displayedSessionTotal {
-    final reachable = sessionCompletedCount + effectiveRemainderCount;
-    final adjustedSessionTotal = sessionTotalCount - unreachableCount;
-    final floor = adjustedSessionTotal > 0 ? adjustedSessionTotal : 0;
-    return reachable > floor ? reachable : floor;
+    return sessionCompletedCount + effectiveRemainderCount;
   }
 
   double get sessionProgress {
@@ -342,11 +341,16 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
 
   Timer? _stalledWatchdog;
   Timer? _retrySweeper;
+  Timer? _queueKicker;
   String? _currentUserId;
 
   // Health-check snapshot from the previous tick — used to detect real progress.
   int _lastCheckCompletedCount = 0;
   int _lastCheckUploadedBytes = 0;
+  // Quand on a basculé en état "all tasks in waiting_retry". Sert à détecter
+  // qu'on stagne dans cet état trop longtemps (iOS/plugin coincé) et à
+  // forcer un FULL RESTART. null = on n'est pas dans cet état.
+  DateTime? _allRetrySince;
   // Number of consecutive 60s ticks where uploads stalled without recovery.
   int _stalledTicks = 0;
 
@@ -360,21 +364,25 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
   // single completion (which would spam getCandidates queries on the DB).
   DateTime _lastTopUpAt = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// True quand le hashing tourne. On évite alors d'enqueuer des fichiers
+  /// (le compte n'est pas encore fiable, et ça ralentit le hashing).
   /// Trigger continueBackup proactively when the in-flight queue gets low,
-  /// keeping iOS fed with fresh tasks at all times.
+  /// keeping iOS fed with fresh tasks at all times. Le seuil et le throttle
+  /// sont ajustés pour que la queue ne se vide jamais à 0 (sinon l'UI flicke
+  /// entre "Upload en cours" et "Préparation"). La prep PhotoKit prenant
+  /// quelques secondes, on top-up bien avant que la queue ne soit drainée.
   void _maybeTopUpQueue() {
-    // Only top up when:
-    //  - queue is getting low (< 50 active uploads)
-    //  - there are still REACHABLE files to back up (excludes iCloud-only)
-    //  - we know the user
-    //  - not already enqueueing
-    //  - haven't already topped up in the last 15 seconds
-    if (state.uploadItems.length >= 50) return;
+    // Watermark à 20 sur cap=25 : top-up dès qu'on a 5 slots libres.
+    // Évite à la fois les trous (queue=0 entre 2 batches) et la sur-saturation
+    // d'iOS.
+    if (state.uploadItems.length >= 20) return;
     if (state.effectiveRemainderCount <= 0) return;
     if (state.isStartingBackup) return;
     if (_currentUserId == null) return;
     final now = DateTime.now();
-    if (now.difference(_lastTopUpAt).inSeconds < 15) return;
+    // Throttle court : 2s entre top-ups (suffit pour que la prep PhotoKit
+    // ait le temps de finir avant qu'on en relance une).
+    if (now.difference(_lastTopUpAt).inSeconds < 2) return;
     _lastTopUpAt = now;
     _logger.info(
       "Low watermark: queue=${state.uploadItems.length}, remaining=${state.remainderCount} — proactively topping up",
@@ -403,17 +411,13 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
     state = state.copyWith(recentSpeedMBs: speed > 0 ? speed : 0);
   }
 
-  /// Tourne toutes les 15s : cancelle les tâches stuck en WAITING_RETRY
-  /// depuis plus de 15s. Cancel = libère le slot iOS + le fichier sera
-  /// re-enqueué comme nouveau task au prochain `continueBackup`. iOS traite
-  /// le nouveau task comme neuf (pas de back-off), donc retry effectif en
-  /// ~15-20s au lieu de 30s/60s/120s avec le back-off natif d'iOS.
+  /// SAFETY NET — historiquement ce sweeper cancellait les WAITING_RETRY
+  /// après 15s. Maintenant on cancel directement dans `_handleTaskStatusUpdate`
+  /// (case waitingToRetry) dès le premier event, donc ce sweeper ne devrait
+  /// quasiment jamais avoir de boulot. On le laisse comme filet de sécurité
+  /// au cas où un task entre en WAITING_RETRY sans déclencher notre handler.
   ///
-  /// IMPORTANT : si >50% des tâches actives sont en WAITING_RETRY (signe que
-  /// iOS rejette en masse — typiquement EMFILE ou taskId reuse), on N'ARRÊTE
-  /// PAS de cancel + re-enqueue, ça empire la situation. On laisse passer
-  /// 1 cycle pour laisser iOS respirer. Le health-check 60s déclenchera un
-  /// FULL RESTART si le souci persiste.
+  /// Si >50% des tâches sont en retry, on skip (système saturé).
   Future<void> _cancelStuckRetries() async {
     if (state.uploadItems.isEmpty) return;
 
@@ -476,7 +480,26 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
     _stalledTicks = 0;
     _stalledWatchdog = Timer.periodic(const Duration(seconds: 60), (_) => _runHealthCheck());
     _retrySweeper = Timer.periodic(const Duration(seconds: 15), (_) => _cancelStuckRetries());
-    _logger.info("Backup health-check started (60s interval)");
+    // Kick périodique du queue refill toutes les 10s, INDÉPENDAMMENT de quelle
+    // page est affichée. Sans ça, iOS peut ralentir les uploads quand l'UI
+    // n'est pas active sur la page de sauvegarde — le user a l'impression que
+    // ça n'avance que quand il regarde la page.
+    _queueKicker = Timer.periodic(const Duration(seconds: 10), (_) => _kickQueue());
+    _logger.info("Backup health-check started (60s interval) + queue kicker (10s)");
+  }
+
+  /// Kick périodique : force un top-up si la queue est sous le watermark,
+  /// même si aucun event de completion n'est arrivé récemment. Ça garantit
+  /// que les uploads continuent peu importe la page affichée.
+  void _kickQueue() {
+    if (state.uploadItems.length >= 20) return;
+    if (state.effectiveRemainderCount <= 0) return;
+    if (state.isStartingBackup) return;
+    if (_currentUserId == null) return;
+    // Bypass le throttle de _maybeTopUpQueue — ce kicker EST le mécanisme
+    // périodique, il a déjà sa propre cadence (10s).
+    _lastTopUpAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _maybeTopUpQueue();
   }
 
   Future<void> _runHealthCheck() async {
@@ -493,6 +516,8 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
       _stalledWatchdog = null;
       _retrySweeper?.cancel();
       _retrySweeper = null;
+      _queueKicker?.cancel();
+      _queueKicker = null;
       _stalledTicks = 0;
       return;
     }
@@ -558,18 +583,36 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
 
     // Cancellation rapide des stuck retries est gérée par _cancelStuckRetries
     // (timer 15s). Ici, si TOUTES les tâches actives restantes sont en
-    // `waitingToRetry` mais pas encore trop vieilles, on laisse iOS gérer.
-    // Pas de FULL RESTART : on annulerait le retry qui aurait peut-être réussi.
+    // `waitingToRetry`, on tolère jusqu'à 2 minutes (iOS peut faire son
+    // back-off). Au-delà, c'est qu'iOS/plugin est coincé (erreur
+    // "Delayed or retried enqueue failed" qui se répète à l'infini) — on
+    // force FULL RESTART pour repartir sur une session propre.
     final allWaitingRetry = state.uploadItems.values.every(
       (item) => item.progress == kUploadStatusWaitingToRetry,
     );
     if (allWaitingRetry && state.uploadItems.isNotEmpty) {
-      _logger.info(
-        "Backup health-check: OK (all ${state.uploadItems.length} active tasks are in iOS retry back-off — "
-        "letting NSURLSession handle it, $snapshot)",
+      _allRetrySince ??= DateTime.now();
+      final stuckFor = DateTime.now().difference(_allRetrySince!);
+      const allRetryRecoveryThreshold = Duration(minutes: 2);
+      if (stuckFor < allRetryRecoveryThreshold) {
+        _logger.info(
+          "Backup health-check: OK (all ${state.uploadItems.length} tasks in iOS retry "
+          "since ${stuckFor.inSeconds}s — FULL RESTART in ${allRetryRecoveryThreshold.inSeconds - stuckFor.inSeconds}s if no recovery, $snapshot)",
+        );
+        _stalledTicks = 0;
+        return;
+      }
+      // Stagnation trop longue → on force la récupération via FULL RESTART.
+      _logger.warning(
+        "Backup health-check: STUCK ${stuckFor.inSeconds}s in all-retry state — "
+        "iOS/plugin jammed, triggering FULL RESTART",
       );
-      _stalledTicks = 0;
-      return;
+      _allRetrySince = null;
+      _stalledTicks = 2; // saute directement à l'étape FULL RESTART (tick 2+)
+      // fall through au bloc "stalled recovery" ci-dessous
+    } else {
+      // On n'est plus en état "all retry" → reset le marker.
+      _allRetrySince = null;
     }
 
     // Suspected stall — count it and trigger recovery.
@@ -826,10 +869,9 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
         break;
 
       case TaskStatus.waitingToRetry:
-        // iOS NSURLSession a échoué une 1ère fois et programme un retry avec
-        // back-off exponentiel. Le task reste dans la queue mais sans progress
-        // pendant 30s/1min/2min/5min. Sans ce log, ça apparaissait juste comme
-        // "[-400%]" dans le dump du watchdog.
+        // iOS a échoué une fois et programme un retry avec back-off. On le
+        // laisse essayer (souvent ça réussit au 2e ou 3e essai). Si le retry
+        // bloque vraiment longtemps, le sweeper 15s prendra le relais.
         _logger.info("Upload WAITING_TO_RETRY: ${update.task.displayName} — iOS scheduled a retry (back-off)");
         break;
 
@@ -927,6 +969,10 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
       _logger.info("startBackup: already running, skipping concurrent call");
       return;
     }
+    // Note : on n'attend PAS la fin du hashing. Les fichiers déjà hashés
+    // sont uploadés immédiatement, et au fur et à mesure que de nouveaux
+    // fichiers deviennent disponibles, ils sont enqueués. Le total affiché
+    // (displayedSessionTotal) se stabilise naturellement à la fin du hashing.
     _logger.info("startBackup: queuing candidates (remainder=${state.remainderCount})");
     _currentUserId = userId;
     _ensureWatchdogRunning();
@@ -977,10 +1023,11 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
   }
 
   /// Top up the FileDownloader queue with newly-hashed candidates without
-  /// resetting session counters. Used while hashing is still in progress so
-  /// new candidates get enqueued as they become ready.
+  /// resetting session counters. Used between batches once hashing is done.
   Future<void> continueBackup(String userId) async {
     if (state.isStartingBackup) return; // already enqueuing
+    // Note : on enqueue même pendant le hashing — les fichiers déjà hashés
+    // sont uploadés au fil de l'eau, ça maximise le débit.
     _logger.info("continueBackup: topping up queue (remainder=${state.remainderCount})");
     _currentUserId = userId;
     _ensureWatchdogRunning();
@@ -1071,6 +1118,7 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
     _progressSubscription?.cancel();
     _stalledWatchdog?.cancel();
     _retrySweeper?.cancel();
+    _queueKicker?.cancel();
     super.dispose();
   }
 }

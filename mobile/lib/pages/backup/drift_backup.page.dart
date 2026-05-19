@@ -415,12 +415,18 @@ class _UploadProgressCard extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
-    final isSyncing = backupState.isSyncing && uploadItems.isEmpty && backupState.enqueueTotalCount == 0;
+    // Une fois qu'on a commencé à uploader des fichiers, on reste sur
+    // "Upload en cours" même si la queue se vide momentanément entre 2
+    // top-ups (sinon l'UI flicke entre "Upload en cours" et "Préparation").
+    final hasStartedUploading = backupState.sessionCompletedCount > 0;
+
+    final isSyncing = backupState.isSyncing && uploadItems.isEmpty && backupState.enqueueTotalCount == 0 && !hasStartedUploading;
     final isStartingNoEnqueueYet = backupState.isStartingBackup &&
         backupState.enqueueTotalCount == 0 &&
         uploadItems.isEmpty &&
-        !backupState.isSyncing;
-    final isEnqueuing = backupState.enqueueTotalCount > 0 && uploadItems.isEmpty;
+        !backupState.isSyncing &&
+        !hasStartedUploading;
+    final isEnqueuing = backupState.enqueueTotalCount > 0 && uploadItems.isEmpty && !hasStartedUploading;
     final isLooseProgress = isSyncing || isStartingNoEnqueueYet || isEnqueuing;
 
     final completed = backupState.sessionCompletedCount;
@@ -494,12 +500,22 @@ class _UploadProgressCard extends ConsumerWidget {
                   ),
                 ),
                 if (!isLooseProgress)
-                  Text(
-                    '$completed / $total',
-                    style: context.textTheme.titleMedium?.copyWith(
-                      color: context.primaryColor,
-                      fontWeight: FontWeight.bold,
-                    ),
+                  Builder(
+                    builder: (context) {
+                      // Pendant le hashing, le total Y peut encore évoluer
+                      // (de nouveaux candidats apparaissent, d'autres sont
+                      // identifiés comme doublons). On affiche "~" pour le
+                      // signaler — une fois le hashing fini, Y est définitif.
+                      final hashing = ref.watch(syncStatusProvider).isHashing;
+                      final separator = hashing ? ' / ~' : ' / ';
+                      return Text(
+                        '$completed$separator$total',
+                        style: context.textTheme.titleMedium?.copyWith(
+                          color: context.primaryColor,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      );
+                    },
                   ),
               ],
             ),
@@ -660,7 +676,6 @@ class _PreparingStatus extends ConsumerStatefulWidget {
 
 class _PreparingStatusState extends ConsumerState {
   Timer? _pollingTimer;
-  int _previousReadyCount = 0;
 
   @override
   void dispose() {
@@ -694,16 +709,11 @@ class _PreparingStatusState extends ConsumerState {
       }
 
       final state = ref.read(driftBackupProvider);
-      final readyCount = state.remainderCount - state.processingCount;
 
-      // If hashing has produced new ready-to-upload candidates, top up the queue
-      // so they actually start uploading instead of waiting for the next manual trigger.
-      if (readyCount > _previousReadyCount && !state.isStartingBackup) {
-        _previousReadyCount = readyCount;
-        unawaited(ref.read(driftBackupProvider.notifier).continueBackup(currentUser.id));
-      } else {
-        _previousReadyCount = readyCount;
-      }
+      // On NE déclenche PLUS continueBackup pendant le hashing : on attend la
+      // fin complète pour avoir un compte fiable et éviter d'enqueuer des
+      // doublons. continueBackup sera appelé une seule fois quand le hashing
+      // sera vraiment terminé (via startBackup post-hash).
 
       // Stop polling if processing count reaches 0
       if (state.processingCount == 0) {

@@ -118,14 +118,11 @@ class UploadService {
     }
   }
 
-  /// Per Apple engineer Quinn ("the Eskimo") on the Apple Developer Forums:
-  /// background URLSession can comfortably handle ~300 tasks; pushing 3000+ at
-  /// once causes the system to throttle / suspend the session. On constate en
-  /// pratique qu'avec >100 tâches en file ET du reuse de taskId (lors des
-  /// cancel+re-enqueue), iOS commence à rejeter en cascade avec
-  /// "Delayed or retried enqueue failed". On garde donc le cap bien en
-  /// dessous pour laisser de la marge.
-  static const int _kMaxQueuedTasks = 75;
+  /// Queue iOS de taille moyenne. Trop tight (10) → trous quand 4 finissent
+  /// en cascade. Trop large (75+) → iOS rejette en cascade. 25 = bon
+  /// compromis : 4 actives + 21 en attente, iOS a toujours du stock sans
+  /// être saturé.
+  static const int _kMaxQueuedTasks = 25;
 
   /// Asset IDs that failed at the upload-prep stage during this app session
   /// (typically iCloud-only originals whose binary content isn't on the device).
@@ -134,6 +131,27 @@ class UploadService {
   /// the livelock where continueBackup fetches the same 13 candidates, all skip,
   /// the watchdog detects "no progress", triggers FULL RESTART, repeat forever.
   static final Set<String> _uploadPrepFailedIds = <String>{};
+
+  /// Cool-down cache pour les fichiers qui viennent d'être rejetés par iOS
+  /// avec "Delayed or retried enqueue failed". Le `taskId` = `assetId` étant
+  /// réutilisé, iOS garde une trace du précédent enqueue pendant un certain
+  /// temps et rejette les re-tentatives immédiates. On laisse passer 60s
+  /// avant d'autoriser la re-enqueue. Sans ça, continueBackup repick les
+  /// mêmes 5-10 fichiers indéfiniment et bloque la queue.
+  static const Duration _kCoolDownDuration = Duration(seconds: 60);
+  static final Map<String, DateTime> _recentlyRejectedIds = <String, DateTime>{};
+
+  /// Ajoute un asset au cool-down après rejet iOS.
+  static void markAssetRecentlyRejected(String assetId) {
+    _recentlyRejectedIds[assetId] = DateTime.now();
+  }
+
+  /// Filtre les assets qui sont en cool-down actif.
+  static Set<String> _purgeAndGetActiveCoolDowns() {
+    final now = DateTime.now();
+    _recentlyRejectedIds.removeWhere((_, time) => now.difference(time) > _kCoolDownDuration);
+    return _recentlyRejectedIds.keys.toSet();
+  }
 
   /// Find backup candidates
   /// Build the upload tasks
@@ -165,13 +183,21 @@ class UploadService {
     }
 
     final allCandidates = await _backupRepository.getCandidates(userId);
+    final coolDownIds = _purgeAndGetActiveCoolDowns();
     final filteredCandidates = allCandidates
         .where((c) => !existingTaskIds.contains(c.id))
         .where((c) => !_uploadPrepFailedIds.contains(c.id))
+        .where((c) => !coolDownIds.contains(c.id))
         .toList();
     final cachedFailedSkipped = allCandidates
         .where((c) => _uploadPrepFailedIds.contains(c.id))
         .length;
+    final coolDownSkipped = allCandidates.where((c) => coolDownIds.contains(c.id)).length;
+    if (coolDownSkipped > 0) {
+      _logger.info(
+        "startBackup: $coolDownSkipped candidate(s) skipped — in cool-down after recent iOS rejection",
+      );
+    }
     // Surface the unreachable count to the UI (so it shows "Tout est sauvegardé"
     // when only iCloud-only files remain).
     onUnreachableUpdate?.call(cachedFailedSkipped);
@@ -203,7 +229,9 @@ class UploadService {
     onEnqueueTasks(EnqueueStatus(enqueueCount: 0, totalCount: candidates.length));
 
     const batchSize = 500;
-    const parallelPrepare = 10;
+    // 20 extractions PhotoKit en parallèle (vs 10 avant) : la prep est la
+    // partie lente, et on veut que la queue iOS soit toujours pleine.
+    const parallelPrepare = 20;
     int count = 0;
     int processed = 0;
     int skipped = 0;
@@ -378,6 +406,15 @@ class UploadService {
           "type=$excType${httpCode != null ? ', HTTP=$httpCode' : ''}, "
           "desc=${exc?.description ?? 'n/a'}",
         );
+        // Si iOS a rejeté l'enqueue (taskId réutilisé trop tôt), on met
+        // l'asset en cool-down pour éviter le ping-pong continueBackup ↔ iOS reject.
+        if (exc?.description == 'Delayed or retried enqueue failed') {
+          markAssetRecentlyRejected(update.task.taskId);
+          _logger.info(
+            "Added ${update.task.displayName} to cool-down (${_kCoolDownDuration.inSeconds}s) — "
+            "will be retried after iOS releases the taskId",
+          );
+        }
         unawaited(
           _uploadRepository.deleteDatabaseRecord(update.task.taskId).catchError((e) {
             _logger.fine('Could not delete task record: $e');

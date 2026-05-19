@@ -104,10 +104,11 @@ Future<void> initApp() async {
 
   // Initialize the file downloader.
   // holdingQueue: (maxConcurrent, maxConcurrentByHost, maxConcurrentByGroup)
-  // - On iOS, NSURLSession.background already caps at 4 connections per host, so we
-  //   match that here to avoid filling the holding queue with idle waiting tasks.
-  // - Lower numbers also help avoid the iOS file descriptor limit (EMFILE) on the
-  //   FileDownloader localstore when there are thousands of queued tasks.
+  // - 4 uploads simultanés : limite iOS NSURLSession.background par host.
+  // - On garde une queue iOS volontairement TRÈS petite (cf. _kMaxQueuedTasks)
+  //   parce qu'on a constaté qu'au-delà de ~10 tasks en queue, iOS commence à
+  //   ralentir / rejeter ("Delayed or retried enqueue failed"). Une queue tight
+  //   = iOS gère mieux chaque upload individuellement.
   await FileDownloader().configure(
     globalConfig: [(Config.holdingQueue, (4, 4, 4)), (Config.runInForegroundIfFileLargerThan, 256)],
   );
