@@ -47,7 +47,12 @@ class AssetApiRepository extends ApiRepository {
   }
 
   Future<void> delete(List<String> ids, bool force) async {
-    return _api.deleteAssets(AssetBulkDeleteDto(ids: ids, force: force));
+    // Timeout 30s pour éviter que l'app reste bloquée si le serveur Ryvie
+    // est lent ou inaccessible. Sans ça, l'utilisateur voit le bouton
+    // "Déplacer vers la corbeille" sans retour pendant des minutes.
+    return _api
+        .deleteAssets(AssetBulkDeleteDto(ids: ids, force: force))
+        .timeout(const Duration(seconds: 30));
   }
 
   Future<void> restoreTrash(List<String> ids) async {

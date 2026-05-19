@@ -118,42 +118,176 @@ class UploadService {
     }
   }
 
+  /// Queue iOS de taille moyenne. Trop tight (10) → trous quand 4 finissent
+  /// en cascade. Trop large (75+) → iOS rejette en cascade. 25 = bon
+  /// compromis : 4 actives + 21 en attente, iOS a toujours du stock sans
+  /// être saturé.
+  static const int _kMaxQueuedTasks = 25;
+
+  /// Asset IDs that failed at the upload-prep stage during this app session
+  /// (typically iCloud-only originals whose binary content isn't on the device).
+  /// They're hashed (so `getCandidates` returns them) but `getUploadTask` returns
+  /// null because PhotoKit refuses to hand back the file. Caching them prevents
+  /// the livelock where continueBackup fetches the same 13 candidates, all skip,
+  /// the watchdog detects "no progress", triggers FULL RESTART, repeat forever.
+  static final Set<String> _uploadPrepFailedIds = <String>{};
+
+  /// Cool-down cache pour les fichiers qui viennent d'être rejetés par iOS
+  /// avec "Delayed or retried enqueue failed". Le `taskId` = `assetId` étant
+  /// réutilisé, iOS garde une trace du précédent enqueue pendant un certain
+  /// temps et rejette les re-tentatives immédiates. On laisse passer 60s
+  /// avant d'autoriser la re-enqueue. Sans ça, continueBackup repick les
+  /// mêmes 5-10 fichiers indéfiniment et bloque la queue.
+  static const Duration _kCoolDownDuration = Duration(seconds: 60);
+  static final Map<String, DateTime> _recentlyRejectedIds = <String, DateTime>{};
+
+  /// Ajoute un asset au cool-down après rejet iOS.
+  static void markAssetRecentlyRejected(String assetId) {
+    _recentlyRejectedIds[assetId] = DateTime.now();
+  }
+
+  /// Filtre les assets qui sont en cool-down actif.
+  static Set<String> _purgeAndGetActiveCoolDowns() {
+    final now = DateTime.now();
+    _recentlyRejectedIds.removeWhere((_, time) => now.difference(time) > _kCoolDownDuration);
+    return _recentlyRejectedIds.keys.toSet();
+  }
+
   /// Find backup candidates
   /// Build the upload tasks
   /// Enqueue the tasks
-  Future<void> startBackup(String userId, void Function(EnqueueStatus status) onEnqueueTasks) async {
+  Future<void> startBackup(
+    String userId,
+    void Function(EnqueueStatus status) onEnqueueTasks, [
+    void Function(int processed, int total)? onPrepProgress,
+    void Function(int unreachable)? onUnreachableUpdate,
+  ]) async {
+    final sw = Stopwatch()..start();
     await _storageRepository.clearCache();
 
     shouldAbortQueuingTasks = false;
 
-    final candidates = await _backupRepository.getCandidates(userId);
-    if (candidates.isEmpty) {
+    // De-duplicate against tasks already enqueued in FileDownloader
+    // (so calling startBackup repeatedly while hashing produces new candidates is safe)
+    final existingTasks = await _uploadRepository.getActiveTasks(kBackupGroup);
+    final existingTaskIds = existingTasks.map((t) => t.taskId).toSet();
+
+    // Cap the total in-flight queue size to avoid iOS background-session throttling.
+    final remainingBudget = _kMaxQueuedTasks - existingTaskIds.length;
+    if (remainingBudget <= 0) {
+      _logger.info(
+        "startBackup: queue already at cap (${existingTaskIds.length}/$_kMaxQueuedTasks) — "
+        "skipping enqueue, will resume on next continueBackup tick",
+      );
       return;
     }
 
-    const batchSize = 100;
+    final allCandidates = await _backupRepository.getCandidates(userId);
+    final coolDownIds = _purgeAndGetActiveCoolDowns();
+    final filteredCandidates = allCandidates
+        .where((c) => !existingTaskIds.contains(c.id))
+        .where((c) => !_uploadPrepFailedIds.contains(c.id))
+        .where((c) => !coolDownIds.contains(c.id))
+        .toList();
+    final cachedFailedSkipped = allCandidates
+        .where((c) => _uploadPrepFailedIds.contains(c.id))
+        .length;
+    final coolDownSkipped = allCandidates.where((c) => coolDownIds.contains(c.id)).length;
+    if (coolDownSkipped > 0) {
+      _logger.info(
+        "startBackup: $coolDownSkipped candidate(s) skipped — in cool-down after recent iOS rejection",
+      );
+    }
+    // Surface the unreachable count to the UI (so it shows "Tout est sauvegardé"
+    // when only iCloud-only files remain).
+    onUnreachableUpdate?.call(cachedFailedSkipped);
+    // Apply the queue cap — only enqueue up to `remainingBudget` new candidates this run.
+    final candidates = filteredCandidates.take(remainingBudget).toList();
+
+    if (candidates.isEmpty) {
+      if (allCandidates.isEmpty) {
+        _logger.info("startBackup: no candidates, everything already backed up");
+      } else if (cachedFailedSkipped > 0) {
+        _logger.info(
+          "startBackup: nothing enqueueable — $cachedFailedSkipped candidates are iCloud-only "
+          "(skipped from cache, will retry on next app launch)",
+        );
+      } else {
+        _logger.info("startBackup: all ${allCandidates.length} candidates already enqueued");
+      }
+      return;
+    }
+    _logger.info(
+      "startBackup: enqueueing ${candidates.length} of ${filteredCandidates.length} candidates "
+      "(cap=$_kMaxQueuedTasks, already in queue=${existingTaskIds.length}, "
+      "iCloud-skipped from cache=$cachedFailedSkipped). "
+      "Remaining ${filteredCandidates.length - candidates.length} will be picked up after some uploads complete.",
+    );
+
+    // Immediately report total so the UI can show "Préparation 0 / N" right away
+    onPrepProgress?.call(0, candidates.length);
+    onEnqueueTasks(EnqueueStatus(enqueueCount: 0, totalCount: candidates.length));
+
+    const batchSize = 500;
+    // 20 extractions PhotoKit en parallèle (vs 10 avant) : la prep est la
+    // partie lente, et on veut que la queue iOS soit toujours pleine.
+    const parallelPrepare = 20;
     int count = 0;
+    int processed = 0;
+    int skipped = 0;
     for (int i = 0; i < candidates.length; i += batchSize) {
       if (shouldAbortQueuingTasks) {
+        _logger.warning("startBackup: aborted by user at $processed/${candidates.length}");
         break;
       }
 
       final batch = candidates.skip(i).take(batchSize).toList();
-      List<UploadTask> tasks = [];
-      for (final asset in batch) {
-        final task = await getUploadTask(asset);
-        if (task != null) {
-          tasks.add(task);
+      final tasks = <UploadTask>[];
+
+      // Prepare tasks in parallel sub-batches to speed up file resolution
+      for (int j = 0; j < batch.length; j += parallelPrepare) {
+        if (shouldAbortQueuingTasks) break;
+        final subBatch = batch.skip(j).take(parallelPrepare).toList();
+        final prepSw = Stopwatch()..start();
+        final results = await Future.wait(subBatch.map(getUploadTask));
+        prepSw.stop();
+        // Log si l'extraction PhotoKit/iCloud d'un sous-batch est lente
+        // (>5s pour 10 fichiers = ~500ms/fichier, typique d'un fetch iCloud).
+        // Permet de voir pourquoi ça "bloque" lors de la préparation.
+        if (prepSw.elapsedMilliseconds > 5000) {
+          _logger.info(
+            "startBackup: slow file extraction — ${prepSw.elapsedMilliseconds}ms for "
+            "${subBatch.length} files (avg ${(prepSw.elapsedMilliseconds / subBatch.length).round()}ms/file) "
+            "— probable iCloud fetch in progress",
+          );
         }
+        for (int k = 0; k < subBatch.length; k++) {
+          if (results[k] == null) {
+            _uploadPrepFailedIds.add(subBatch[k].id);
+          } else {
+            tasks.add(results[k]!);
+          }
+        }
+        skipped += subBatch.length - results.whereType<UploadTask>().length;
+        processed += subBatch.length;
+        onPrepProgress?.call(processed, candidates.length);
       }
 
       if (tasks.isNotEmpty && !shouldAbortQueuingTasks) {
         count += tasks.length;
-        await enqueueTasks(tasks);
-
+        try {
+          await enqueueTasks(tasks);
+          _logger.info("startBackup: enqueued ${tasks.length} (total: $count/${candidates.length})");
+        } catch (e, st) {
+          _logger.severe("startBackup: failed to enqueue batch of ${tasks.length}", e, st);
+        }
         onEnqueueTasks(EnqueueStatus(enqueueCount: count, totalCount: candidates.length));
       }
     }
+    sw.stop();
+    _logger.info(
+      "startBackup: done in ${sw.elapsed.inSeconds}s — enqueued=$count, skipped=$skipped (iCloud/missing), total candidates=${candidates.length}",
+    );
   }
 
   Future<void> startBackupWithHttpClient(String userId, bool hasWifi, CancellationToken token) async {
@@ -211,6 +345,32 @@ class UploadService {
     return _uploadRepository.start();
   }
 
+  /// Cancel a specific list of tasks (used to forcibly clear stuck uploads).
+  Future<void> cancelTasks(List<String> taskIds) {
+    return _uploadRepository.cancelTasksWithIds(taskIds);
+  }
+
+  /// Hard-reset the FileDownloader group: cancels every task in the group at the
+  /// URLSession level and wipes the localstore records. Use this when iOS has
+  /// frozen the NSURLSession slots — re-enqueueing afterwards is the closest
+  /// in-process equivalent of restarting the app.
+  ///
+  /// Also stops any in-flight `startBackup` enqueue loop by setting the abort flag,
+  /// AND vide le cache des fichiers marqués comme inaccessibles (iCloud). Sans
+  /// ce reset, après un FULL RESTART, le système croit que tous les fichiers
+  /// restants sont iCloud-only et n'essaie plus rien — alors qu'on vient
+  /// justement de tout réinitialiser pour leur donner une nouvelle chance.
+  Future<void> forceResetQueue() async {
+    shouldAbortQueuingTasks = true;
+    final cachedFailures = _uploadPrepFailedIds.length;
+    _uploadPrepFailedIds.clear();
+    if (cachedFailures > 0) {
+      _logger.info('forceResetQueue: cleared $cachedFailures cached iCloud/missing failures so they get retried');
+    }
+    await _uploadRepository.reset(kBackupGroup);
+    await _uploadRepository.deleteDatabaseRecords(kBackupGroup);
+  }
+
   void _handleTaskStatusUpdate(TaskStatusUpdate update) async {
     switch (update.status) {
       case TaskStatus.complete:
@@ -221,10 +381,54 @@ class UploadService {
             final path = await update.task.filePath();
             await File(path).delete();
           } catch (e) {
-            _logger.severe('Error deleting file path for iOS: $e');
+            _logger.fine('Temp file already deleted for iOS: $e');
           }
         }
 
+        // Delete the task record from FileDownloader's localstore to keep the
+        // task records directory small. Otherwise, with thousands of completed
+        // tasks, iOS runs out of file descriptors (EMFILE) when scanning records.
+        unawaited(
+          _uploadRepository.deleteDatabaseRecord(update.task.taskId).catchError((e) {
+            _logger.fine('Could not delete task record: $e');
+          }),
+        );
+        break;
+
+      case TaskStatus.failed:
+        // Log iOS-level details — HTTP code + exception type — pour comprendre
+        // si c'est un timeout NSURLSession, un 401, un 5xx serveur, etc.
+        final exc = update.exception;
+        final httpCode = (exc is TaskHttpException) ? exc.httpResponseCode : null;
+        final excType = exc?.exceptionType ?? 'unknown';
+        _logger.warning(
+          "iOS task FAILED: ${update.task.displayName} — "
+          "type=$excType${httpCode != null ? ', HTTP=$httpCode' : ''}, "
+          "desc=${exc?.description ?? 'n/a'}",
+        );
+        // Si iOS a rejeté l'enqueue (taskId réutilisé trop tôt), on met
+        // l'asset en cool-down pour éviter le ping-pong continueBackup ↔ iOS reject.
+        if (exc?.description == 'Delayed or retried enqueue failed') {
+          markAssetRecentlyRejected(update.task.taskId);
+          _logger.info(
+            "Added ${update.task.displayName} to cool-down (${_kCoolDownDuration.inSeconds}s) — "
+            "will be retried after iOS releases the taskId",
+          );
+        }
+        unawaited(
+          _uploadRepository.deleteDatabaseRecord(update.task.taskId).catchError((e) {
+            _logger.fine('Could not delete task record: $e');
+          }),
+        );
+        break;
+
+      case TaskStatus.canceled:
+        _logger.info("iOS task CANCELED: ${update.task.displayName}");
+        unawaited(
+          _uploadRepository.deleteDatabaseRecord(update.task.taskId).catchError((e) {
+            _logger.fine('Could not delete task record: $e');
+          }),
+        );
         break;
 
       default:
@@ -306,6 +510,24 @@ class UploadService {
     final entity = await _storageRepository.getAssetEntityForAsset(asset);
     if (entity == null) {
       return null;
+    }
+
+    // Si le user a activé "ignorer les photos iCloud", on évite carrément
+    // de tenter l'extraction (qui déclenche un fetch iCloud lent puis échoue).
+    // On check `isLocallyAvailable` avant tout — c'est très rapide (lecture
+    // d'attribut PhotoKit).
+    if (Platform.isIOS && _appSettingsService.getSetting(AppSettingsEnum.ignoreIcloudAssets)) {
+      try {
+        final available = await entity.isLocallyAvailable(isOrigin: true).timeout(const Duration(seconds: 1));
+        if (!available) {
+          // Fichier iCloud uniquement → skip immédiatement, le cache
+          // _uploadPrepFailedIds le retiendra pour éviter les re-tries.
+          return null;
+        }
+      } catch (_) {
+        // En cas d'erreur de check, on laisse passer pour fallback sur
+        // l'ancien comportement (3s timeout).
+      }
     }
 
     File? file;

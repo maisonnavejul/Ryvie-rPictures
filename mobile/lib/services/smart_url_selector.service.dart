@@ -12,7 +12,11 @@ class SmartUrlSelectorService {
   final _log = Logger('SmartUrlSelectorService');
 
   static const String localServerUrl = 'http://ryvie.local:3013';
-  static const String localApiUrl = 'http://ryvie.local:3002/api/settings/ryvie-domains';
+  /// Endpoint complet (ryvieId + tunnelHost + publicUrl + setupKey) — nécessite un JWT.
+  static const String localTunnelInfoUrl = 'http://ryvie.local:3002/api/settings/ryvie-domains';
+  /// Endpoint léger qui renvoie juste le ryvieId, sans auth — utilisé pour
+  /// vérifier rapidement si on est bien sur notre Ryvie.
+  static const String localMachineIdUrl = 'http://ryvie.local:3002/api/machine-id';
   static const Duration connectionTimeout = Duration(seconds: 2);
 
   /// Teste si une URL est accessible
@@ -55,7 +59,7 @@ class SmartUrlSelectorService {
 
       _log.info('🔑 Token JWT trouvé - longueur: ${token.length} caractères');
 
-      final uri = Uri.parse(localApiUrl);
+      final uri = Uri.parse(localTunnelInfoUrl);
       final client = HttpClient();
       client.connectionTimeout = connectionTimeout;
 
@@ -63,7 +67,7 @@ class SmartUrlSelectorService {
 
       // Ajouter le header Authorization avec le token JWT
       request.headers.set('Authorization', 'Bearer $token');
-      _log.info('📤 Envoi requête à: $localApiUrl avec Authorization header');
+      _log.info('📤 Envoi requête à: $localTunnelInfoUrl avec Authorization header');
 
       final response = await request.close();
 
@@ -156,6 +160,43 @@ class SmartUrlSelectorService {
     final localAvailable = await _testUrlConnection(localServerUrl);
 
     if (localAvailable) {
+      // Vérifier que c'est BIEN notre Ryvie (et pas un Ryvie inconnu sur le même
+      // réseau). Sans ce contrôle, on s'authentifierait contre un Ryvie étranger,
+      // l'auth échouerait et le splash screen nous déloguerait — l'utilisateur
+      // perçoit ça comme une déconnexion alors qu'il devrait juste basculer
+      // sur le tunnel.
+      final savedRyvieId = Store.tryGet(StoreKey.ryvieId);
+      if (savedRyvieId != null && savedRyvieId.isNotEmpty) {
+        final localRyvieId = await _fetchLocalRyvieIdQuick();
+        final hasPublicFallback = _hasPublicUrlConfigured();
+        final mismatch = localRyvieId != null && localRyvieId != savedRyvieId;
+        final unverified = localRyvieId == null;
+
+        if (mismatch) {
+          _log.warning(
+            '⚠️  ryvie.local répond mais c\'est un AUTRE Ryvie (id=$localRyvieId, attendu=$savedRyvieId) '
+            '— bascule directe sur l\'URL publique pour ne pas déconnecter l\'utilisateur',
+          );
+          return _selectPublicUrlOrThrow();
+        }
+        if (unverified && hasPublicFallback) {
+          // Impossible de confirmer que c'est notre Ryvie (port 3002 ne répond
+          // pas dans le délai imparti). C'est suspect : un Ryvie étranger sur le
+          // réseau peut très bien répondre sur :3013 sans exposer :3002. Comme
+          // on a une URL publique configurée, on préfère la sécurité — bascule
+          // sur le tunnel plutôt que de risquer de s'authentifier contre un
+          // mauvais Ryvie (ce qui déclencherait un logout côté splash).
+          _log.warning(
+            '⚠️  ryvie.local répond sur :3013 mais ryvieId non vérifiable sur :3002 '
+            '— bascule par précaution sur l\'URL publique pour ne pas risquer un mauvais auth',
+          );
+          return _selectPublicUrlOrThrow();
+        }
+        // Si pas de fallback public et ryvieId non vérifié, on continue avec le
+        // local : c'est le scénario typique d'une première installation à la
+        // maison où on n'a pas encore récupéré les infos tunnel.
+      }
+
       _log.info('✅ Connexion LOCALE réussie - Utilisation de $localServerUrl');
 
       // Récupérer automatiquement les informations du tunnel en arrière-plan
@@ -169,15 +210,26 @@ class SmartUrlSelectorService {
 
     // 2. La connexion locale a échoué, essayer l'URL publique
     _log.info('❌ Connexion locale échouée - Tentative connexion PUBLIQUE');
+    return _selectPublicUrlOrThrow();
+  }
 
-    // Récupérer l'URL publique sauvegardée
+  /// Retourne true si une URL publique ou un tunnelHost est sauvegardé.
+  bool _hasPublicUrlConfigured() {
+    final publicUrl = Store.tryGet(StoreKey.publicUrl);
+    final tunnelHost = Store.tryGet(StoreKey.tunnelHost);
+    return (publicUrl != null && publicUrl.isNotEmpty) || (tunnelHost != null && tunnelHost.isNotEmpty);
+  }
+
+  /// Retourne l'URL publique/tunnel sauvegardée ou lève NO_TUNNEL_CONFIG.
+  /// Utilisé soit en fallback quand le local échoue, soit quand on détecte
+  /// que ryvie.local répond pour un AUTRE Ryvie.
+  ({String url, bool isLocal}) _selectPublicUrlOrThrow() {
     final publicUrl = Store.tryGet(StoreKey.publicUrl);
     final tunnelHost = Store.tryGet(StoreKey.tunnelHost);
 
     _log.info('📦 Infos sauvegardées - publicUrl: ${publicUrl ?? "VIDE"}, tunnelHost: ${tunnelHost ?? "VIDE"}');
 
     String? urlToTry;
-
     if (publicUrl != null && publicUrl.isNotEmpty) {
       urlToTry = publicUrl;
       _log.info('✅ URL publique trouvée: $urlToTry');
@@ -187,16 +239,38 @@ class SmartUrlSelectorService {
     }
 
     if (urlToTry != null) {
-      // Pour l'URL publique/tunnel, on ne fait plus de test HTTP préalable.
-      // On se comporte comme lorsque l'utilisateur saisit l'URL à la main :
-      // on utilise directement cette URL, et les appels API remonteront
-      // une erreur s'il y a réellement un problème.
       _log.info('✅ Utilisation directe de l\'URL PUBLIQUE: $urlToTry');
       return (url: urlToTry, isLocal: false);
-    } else {
-      _log.severe('⚠️  Aucune URL publique configurée');
-      throw Exception('NO_TUNNEL_CONFIG');
     }
+    _log.severe('⚠️  Aucune URL publique configurée');
+    throw Exception('NO_TUNNEL_CONFIG');
+  }
+
+  /// Récupère rapidement le ryvieId du Ryvie qui répond actuellement sur
+  /// ryvie.local. Timeout court (2s) — c'est juste pour confirmer qu'on est
+  /// bien sur notre Ryvie avant de l'utiliser. Renvoie null en cas d'échec.
+  Future<String?> _fetchLocalRyvieIdQuick() async {
+    try {
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 2);
+      final request = await client
+          .getUrl(Uri.parse(localMachineIdUrl))
+          .timeout(const Duration(seconds: 2));
+      final response = await request.close().timeout(const Duration(seconds: 2));
+      if (response.statusCode == 200) {
+        final body = await response.transform(utf8.decoder).join();
+        final data = json.decode(body) as Map<String, dynamic>;
+        client.close();
+        if (data['success'] == true) {
+          return data['ryvieId'] as String?;
+        }
+      } else {
+        client.close();
+      }
+    } catch (e) {
+      _log.warning('⚠️  Impossible de lire ryvieId local rapidement: $e');
+    }
+    return null;
   }
 
   /// Sauvegarde les informations de tunnel pour une utilisation future
