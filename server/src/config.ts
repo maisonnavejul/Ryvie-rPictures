@@ -293,7 +293,7 @@ export const defaults = Object.freeze<SystemConfig>({
     clientSecret: process.env.OAUTH_CLIENT_SECRET || 'rpictures-secret-change-in-production',
     defaultStorageQuota: process.env.OAUTH_DEFAULT_STORAGE_QUOTA ? Number(process.env.OAUTH_DEFAULT_STORAGE_QUOTA) : null,
     enabled: process.env.OAUTH_ENABLED !== 'false',
-    issuerUrl: process.env.OAUTH_ISSUER_URL || 'http://ryvie.local:3005/realms/ryvie',
+    issuerUrl: process.env.OAUTH_ISSUER_URL || 'http://ryvie.local/auth/realms/ryvie',
     mobileOverrideEnabled: process.env.OAUTH_MOBILE_OVERRIDE_ENABLED === 'true',
     mobileRedirectUri: process.env.OAUTH_MOBILE_REDIRECT_URI || '',
     scope: process.env.OAUTH_SCOPE || 'openid email profile',
