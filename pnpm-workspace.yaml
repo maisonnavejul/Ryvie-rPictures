@@ -7,6 +7,8 @@ packages:
   - plugins
   - web
   - .github
+patchedDependencies:
+  '@immich/ui@0.43.0': patches/@immich__ui@0.43.0.patch
 ignoredBuiltDependencies:
   - '@nestjs/core'
   - '@scarf/scarf'

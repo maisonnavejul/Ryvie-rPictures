@@ -1,0 +1,12 @@
+diff --git a/dist/components/Logo/Logo.svelte b/dist/components/Logo/Logo.svelte
+--- a/dist/components/Logo/Logo.svelte
++++ b/dist/components/Logo/Logo.svelte
+@@ -34,7 +34,7 @@
+       }
+
+       default: {
+-        return icon;
++        return '/rpictures-logo.png';
+       }
+     }
+   };
