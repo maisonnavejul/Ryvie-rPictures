@@ -247,11 +247,10 @@ export class AuthService extends BaseService {
       throw new BadRequestException('OAuth is not enabled');
     }
 
-    // Construire l'issuerUrl dynamiquement en fonction de l'origine
     const dynamicOauth = { ...oauth };
     try {
       const redirectUrl = new URL(dto.redirectUri);
-      dynamicOauth.issuerUrl = `http://${redirectUrl.hostname}:3005/realms/ryvie`;
+      dynamicOauth.issuerUrl = this.buildIssuerUrl(oauth.issuerUrl, redirectUrl.hostname);
     } catch (error) {
       this.logger.warn(`Invalid redirectUri, using default issuerUrl: ${error}`);
     }
@@ -278,11 +277,10 @@ export class AuthService extends BaseService {
     const { oauth } = await this.getConfig({ withCache: false });
     const url = this.resolveRedirectUri(oauth, dto.url);
     
-    // Construire l'issuerUrl dynamiquement en fonction de l'URL de callback
     const dynamicOauth = { ...oauth };
     try {
       const callbackUrl = new URL(url);
-      dynamicOauth.issuerUrl = `http://${callbackUrl.hostname}:3005/realms/ryvie`;
+      dynamicOauth.issuerUrl = this.buildIssuerUrl(oauth.issuerUrl, callbackUrl.hostname);
     } catch (error) {
       this.logger.warn(`Invalid callback URL, using default issuerUrl: ${error}`);
     }
@@ -565,6 +563,12 @@ export class AuthService extends BaseService {
   private getClaim<T>(profile: OAuthProfile, options: ClaimOptions<T>): T {
     const value = profile[options.key as keyof OAuthProfile];
     return options.isValid(value) ? (value as T) : options.default;
+  }
+
+  private buildIssuerUrl(templateUrl: string, hostname: string): string {
+    const url = new URL(templateUrl);
+    url.hostname = hostname;
+    return url.toString().replace(/\/$/, '');
   }
 
   private resolveRedirectUri(

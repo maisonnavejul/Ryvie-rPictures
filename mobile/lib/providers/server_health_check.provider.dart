@@ -240,7 +240,9 @@ class ServerHealthCheckNotifier {
     client.connectionTimeout = const Duration(seconds: 5);
 
     // Utiliser l'endpoint Ryvie Settings sur le port 3002
-    const apiUrl = 'http://ryvie.local:3002/api/settings/ryvie-domains';
+    // Endpoint léger qui renvoie juste { success, ryvieId } sans nécessiter
+    // de JWT — parfait pour le health-check.
+    const apiUrl = 'http://ryvie.local:3002/api/machine-id';
     final uri = Uri.parse(apiUrl);
 
     _log.info('🔗 Appel API: $apiUrl');

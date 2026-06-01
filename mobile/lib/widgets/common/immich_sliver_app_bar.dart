@@ -201,10 +201,15 @@ class _BackupIndicator extends ConsumerWidget {
 
   Widget? _getBackupBadgeIcon(BuildContext context, WidgetRef ref) {
     final backupStateStream = ref.watch(settingsProvider).watch(Setting.enableBackup);
-    final hasError = ref.watch(driftBackupProvider.select((state) => state.error != BackupError.none));
+    final backupState = ref.watch(driftBackupProvider);
     final isDarkTheme = context.isDarkTheme;
     final iconColor = isDarkTheme ? Colors.white : Colors.black;
-    final isUploading = ref.watch(driftBackupProvider.select((state) => state.uploadItems.isNotEmpty));
+    final isUploading = backupState.uploadItems.isNotEmpty;
+    final isActive = backupState.isActive;
+    // Only show error badge if backup is truly stuck: error AND no current activity.
+    // Transient sync failures are auto-cleared on next sync, so we don't want to alarm the user
+    // while uploads are still progressing in the background.
+    final hasError = backupState.error != BackupError.none && !isActive && !isUploading;
 
     return StreamBuilder(
       stream: backupStateStream,

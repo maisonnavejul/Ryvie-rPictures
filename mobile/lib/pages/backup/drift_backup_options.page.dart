@@ -39,26 +39,32 @@ class DriftBackupOptionsPage extends ConsumerWidget {
         if (didPop && !hasPopped) {
           hasPopped = true;
 
+          // Capturer toutes les refs AVANT le premier await — onPopInvoked
+          // est appelé pendant le dispose du widget, donc ref n'est plus
+          // utilisable après une suspension async.
           final currentUser = ref.read(currentUserProvider);
           if (currentUser == null) {
             return;
           }
+          final backupNotifier = ref.read(driftBackupProvider.notifier);
+          final appSettings = ref.read(appSettingsServiceProvider);
+          final backgroundSync = ref.read(backgroundSyncProvider);
+          final messenger = ScaffoldMessenger.maybeOf(context);
 
-          await ref.read(driftBackupProvider.notifier).getBackupStatus(currentUser.id);
-          final isBackupEnabled = ref.read(appSettingsServiceProvider).getSetting(AppSettingsEnum.enableBackup);
+          await backupNotifier.getBackupStatus(currentUser.id);
+
+          final isBackupEnabled = appSettings.getSetting(AppSettingsEnum.enableBackup);
           if (!isBackupEnabled) {
             return;
           }
 
-          ScaffoldMessenger.of(context).showSnackBar(
+          messenger?.showSnackBar(
             SnackBar(
               content: Text("network_requirements_updated".t(context: context)),
               duration: const Duration(seconds: 4),
             ),
           );
 
-          final backupNotifier = ref.read(driftBackupProvider.notifier);
-          final backgroundSync = ref.read(backgroundSyncProvider);
           unawaited(
             backupNotifier.cancel().whenComplete(
               () => backgroundSync.syncRemote().then((success) {

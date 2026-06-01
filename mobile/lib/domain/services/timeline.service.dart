@@ -162,6 +162,19 @@ class TimelineService {
     _buffer = await _assetSource(start, len);
     _bufferOffset = start;
 
+    // Le DB query peut renvoyer moins d'assets que demandé (ex: suppressions
+    // entre le calcul de _totalAssets et le load). Plutôt que de planter avec
+    // un RangeError, on retourne ce qu'on peut. Ça évite de spammer les logs
+    // pendant les gros sync (où l'index défile et la DB change en parallèle).
+    if (!hasRange(index, count)) {
+      final bufferEnd = _bufferOffset + _buffer.length;
+      if (index >= _bufferOffset && index < bufferEnd) {
+        final available = bufferEnd - index;
+        return getAssets(index, available);
+      }
+      return const [];
+    }
+
     return getAssets(index, count);
   }
 

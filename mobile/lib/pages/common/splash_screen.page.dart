@@ -105,16 +105,46 @@ class SplashScreenPageState extends ConsumerState<SplashScreenPage> {
               log.severe('Failed establishing connection to the server: $e');
             }
           },
-          onError: (exception) => {
-            log.severe('Failed to update auth info with access token: $accessToken'),
-            ref.read(authProvider.notifier).logout(),
-            context.replaceRoute(const LoginRoute()),
+          onError: (exception) async {
+            log.severe('Failed to update auth info with access token: $accessToken — $exception');
+
+            // On est peut-être sur un réseau étranger où ryvie.local pointe
+            // vers un autre Ryvie. On essaye de basculer sur l'URL publique
+            // et de re-tenter l'auth.
+            try {
+              final tunnelUrl = await ref
+                  .read(authProvider.notifier)
+                  .setOpenApiServiceEndpoint(forceTunnel: true);
+              if (tunnelUrl != null) {
+                log.info('🔄 Bascule sur tunnel après échec auth: $tunnelUrl — re-tentative');
+                final retryOk = await ref
+                    .read(authProvider.notifier)
+                    .saveAuthInfo(accessToken: accessToken)
+                    .then((_) => true, onError: (_) => false);
+                if (retryOk) {
+                  log.info('✅ Auth réussie via tunnel après échec local');
+                  return;
+                }
+                log.warning('⚠️  Auth via tunnel échouée aussi — on reste connecté quand même');
+              }
+            } catch (tunnelError) {
+              log.warning('⚠️  Impossible de basculer sur tunnel: $tunnelError');
+            }
+
+            // Pas de déconnexion automatique — l'utilisateur peut être hors
+            // ligne ou sur un réseau qui n'a pas accès. On laisse la session
+            // intacte ; le health-check / banner se chargera d'indiquer
+            // l'état réseau et de retenter en arrière-plan.
+            log.info('ℹ️  Auth échouée mais on garde la session (pas de déconnexion auto)');
           },
         ),
       );
     } else {
-      log.severe('Missing crucial offline login info - Logging out completely');
-      unawaited(ref.read(authProvider.notifier).logout());
+      // Vraie absence de credentials (accessToken / serverUrl / endpoint manquants) —
+      // l'utilisateur n'est jamais loggé OU les données ont été effacées manuellement.
+      // On ne fait PAS de logout (rien à logout) ; on route juste vers l'écran de
+      // connexion. Aucune déconnexion automatique de session valide possible.
+      log.info('ℹ️  Aucun credential trouvé — route vers Login (pas de logout)');
       unawaited(context.replaceRoute(const LoginRoute()));
       return;
     }

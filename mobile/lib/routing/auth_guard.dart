@@ -25,21 +25,23 @@ class AuthGuard extends AutoRouteGuard {
       // Validate the access token with the server
       final res = await _apiService.authenticationApi.validateAccessToken();
       if (res == null || res.authStatus != true) {
-        // If the access token is invalid, take user back to login
-        _log.fine('User token is invalid. Redirecting to login');
-        unawaited(router.replaceAll([const LoginRoute()]));
+        // Token rejeté par le serveur — peut être un mauvais Ryvie (réseau
+        // étranger) plutôt qu'un vrai token invalide. On NE redirige PAS
+        // automatiquement : l'utilisateur ne doit pas être déconnecté juste
+        // parce qu'on a interrogé le mauvais serveur.
+        _log.warning('Token rejected by server — staying on current route (no auto-disconnect)');
       }
     } on StoreKeyNotFoundException catch (_) {
-      // If there is no access token, take us to the login page
-      _log.warning('No access token in the store.');
+      // Pas du tout de token = première installation ou données effacées.
+      // Là c'est légitime de router vers Login (rien à utiliser).
+      _log.info('No access token in the store — routing to Login');
       unawaited(router.replaceAll([const LoginRoute()]));
       return;
     } on ApiException catch (e) {
-      // On an unauthorized request, take us to the login page
+      // 401 sur la validation = même raisonnement que ci-dessus : peut-être
+      // qu'on tape sur le mauvais Ryvie. Pas de redirection automatique.
       if (e.code == HttpStatus.unauthorized) {
-        _log.warning("Unauthorized access token.");
-        unawaited(router.replaceAll([const LoginRoute()]));
-        return;
+        _log.warning("Token unauthorized by server — staying on current route (no auto-disconnect)");
       }
     } catch (e) {
       // Otherwise, this is not fatal, but we still log the warning
