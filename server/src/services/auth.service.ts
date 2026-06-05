@@ -250,7 +250,7 @@ export class AuthService extends BaseService {
     const dynamicOauth = { ...oauth };
     try {
       const redirectUrl = new URL(dto.redirectUri);
-      dynamicOauth.issuerUrl = this.buildIssuerUrl(oauth.issuerUrl, redirectUrl.hostname);
+      dynamicOauth.issuerUrl = this.buildIssuerUrl(oauth.issuerUrl, redirectUrl.hostname, redirectUrl.protocol);
     } catch (error) {
       this.logger.warn(`Invalid redirectUri, using default issuerUrl: ${error}`);
     }
@@ -280,7 +280,7 @@ export class AuthService extends BaseService {
     const dynamicOauth = { ...oauth };
     try {
       const callbackUrl = new URL(url);
-      dynamicOauth.issuerUrl = this.buildIssuerUrl(oauth.issuerUrl, callbackUrl.hostname);
+      dynamicOauth.issuerUrl = this.buildIssuerUrl(oauth.issuerUrl, callbackUrl.hostname, callbackUrl.protocol);
     } catch (error) {
       this.logger.warn(`Invalid callback URL, using default issuerUrl: ${error}`);
     }
@@ -565,9 +565,22 @@ export class AuthService extends BaseService {
     return options.isValid(value) ? (value as T) : options.default;
   }
 
-  private buildIssuerUrl(templateUrl: string, hostname: string): string {
+  private buildIssuerUrl(templateUrl: string, hostname: string, protocol?: string): string {
     const url = new URL(templateUrl);
-    url.hostname = hostname;
+    const publicAuthHost = process.env.OAUTH_PUBLIC_HOST;
+    if (publicAuthHost && hostname && hostname.endsWith('.ryvie.fr')) {
+      // Accès public → Keycloak public canonique de la box.
+      url.hostname = publicAuthHost;
+      url.protocol = 'https:';
+      url.port = '';
+    } else {
+      // Accès LAN / tunnel (IP) → on garde l'hôte demandé → Keycloak local.
+      url.hostname = hostname;
+      if (protocol) {
+        url.protocol = protocol;
+        url.port = '';
+      }
+    }
     return url.toString().replace(/\/$/, '');
   }
 
