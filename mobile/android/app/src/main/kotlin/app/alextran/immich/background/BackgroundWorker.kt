@@ -133,9 +133,8 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
       } else {
         setForegroundAsync(ForegroundInfo(NOTIFICATION_ID, notification))
       }
-    } else {
-      notificationManager.notify(NOTIFICATION_ID, notification)
     }
+    // Ryvie: no sync-progress notification when not required by the OS (foreground service)
   }
 
   override fun close() {

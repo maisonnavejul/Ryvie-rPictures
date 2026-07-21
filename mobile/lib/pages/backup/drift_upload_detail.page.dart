@@ -7,6 +7,7 @@ import 'package:immich_mobile/extensions/translate_extensions.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail.widget.dart';
 import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
+import 'package:immich_mobile/services/upload.service.dart';
 import 'package:immich_mobile/utils/bytes_units.dart';
 import 'package:path/path.dart' as path;
 
@@ -207,7 +208,7 @@ class FileDetailDialog extends ConsumerWidget {
       content: SizedBox(
         width: double.maxFinite,
         child: FutureBuilder<LocalAsset?>(
-          future: _getAssetDetails(ref, uploadStatus.taskId),
+          future: _getAssetDetails(ref, UploadService.assetIdOf(uploadStatus.taskId)),
           builder: (context, snapshot) {
             if (snapshot.connectionState == ConnectionState.waiting) {
               return const SizedBox(height: 200, child: Center(child: CircularProgressIndicator()));

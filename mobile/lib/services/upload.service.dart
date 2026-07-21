@@ -141,9 +141,23 @@ class UploadService {
   static const Duration _kCoolDownDuration = Duration(seconds: 60);
   static final Map<String, DateTime> _recentlyRejectedIds = <String, DateTime>{};
 
+  /// Nombre de rejets iOS par asset. Sert à générer un taskId UNIQUE à chaque
+  /// re-tentative ("assetId#r1", "#r2", ...) : iOS garde en mémoire les taskId
+  /// déjà vus et peut rejeter leur réutilisation bien au-delà du cool-down de
+  /// 60s — certains fichiers ne passaient donc JAMAIS. Avec un taskId frais,
+  /// iOS accepte l'enqueue après le cool-down.
+  static final Map<String, int> _rejectAttempts = <String, int>{};
+
+  /// taskId → assetId (retire le suffixe "#rN" de re-tentative).
+  static String assetIdOf(String taskId) {
+    final i = taskId.indexOf('#');
+    return i == -1 ? taskId : taskId.substring(0, i);
+  }
+
   /// Ajoute un asset au cool-down après rejet iOS.
   static void markAssetRecentlyRejected(String assetId) {
     _recentlyRejectedIds[assetId] = DateTime.now();
+    _rejectAttempts[assetId] = (_rejectAttempts[assetId] ?? 0) + 1;
   }
 
   /// Filtre les assets qui sont en cool-down actif.
@@ -170,7 +184,7 @@ class UploadService {
     // De-duplicate against tasks already enqueued in FileDownloader
     // (so calling startBackup repeatedly while hashing produces new candidates is safe)
     final existingTasks = await _uploadRepository.getActiveTasks(kBackupGroup);
-    final existingTaskIds = existingTasks.map((t) => t.taskId).toSet();
+    final existingTaskIds = existingTasks.map((t) => assetIdOf(t.taskId)).toSet();
 
     // Cap the total in-flight queue size to avoid iOS background-session throttling.
     final remainingBudget = _kMaxQueuedTasks - existingTaskIds.length;
@@ -375,6 +389,7 @@ class UploadService {
     switch (update.status) {
       case TaskStatus.complete:
         unawaited(_handleLivePhoto(update));
+        unawaited(_reconcileDuplicate(update));
 
         if (CurrentPlatform.isIOS) {
           try {
@@ -409,10 +424,10 @@ class UploadService {
         // Si iOS a rejeté l'enqueue (taskId réutilisé trop tôt), on met
         // l'asset en cool-down pour éviter le ping-pong continueBackup ↔ iOS reject.
         if (exc?.description == 'Delayed or retried enqueue failed') {
-          markAssetRecentlyRejected(update.task.taskId);
+          markAssetRecentlyRejected(assetIdOf(update.task.taskId));
           _logger.info(
             "Added ${update.task.displayName} to cool-down (${_kCoolDownDuration.inSeconds}s) — "
-            "will be retried after iOS releases the taskId",
+            "will be retried with a fresh taskId",
           );
         }
         unawaited(
@@ -433,6 +448,44 @@ class UploadService {
 
       default:
         break;
+    }
+  }
+
+  /// HTTP 200 + status "duplicate" : le serveur possède déjà le contenu
+  /// uploadé, mais si notre checksum local ne matche aucun asset distant
+  /// (hash calculé avant une modification du fichier), l'asset resterait
+  /// "à sauvegarder" et serait ré-uploadé en boucle. On copie alors le
+  /// checksum de l'asset distant sur l'asset local pour réconcilier.
+  Future<void> _reconcileDuplicate(TaskStatusUpdate update) async {
+    try {
+      // Pas pour la partie vidéo des Live Photos : c'est un asset distant
+      // séparé, son checksum ne correspond pas à l'asset local (l'image).
+      if (update.task.group == kBackupLivePhotoGroup) {
+        return;
+      }
+      if (update.responseStatusCode != 200) {
+        return;
+      }
+      final body = update.responseBody;
+      if (body == null || body.isEmpty) {
+        return;
+      }
+      final response = jsonDecode(body);
+      if (response is! Map || response['status'] != 'duplicate') {
+        return;
+      }
+      final remoteId = response['id'] as String?;
+      if (remoteId == null) {
+        return;
+      }
+      final assetId = assetIdOf(update.task.taskId);
+      final reconciled = await _backupRepository.reconcileChecksumFromRemote(assetId, remoteId);
+      _logger.info(
+        "Duplicate upload ${update.task.displayName}: "
+        "${reconciled ? "local checksum reconciled with remote asset $remoteId" : "remote asset $remoteId not in local DB yet — will reconcile after next sync"}",
+      );
+    } catch (e) {
+      _logger.warning("Failed to reconcile duplicate upload for ${update.task.displayName}: $e");
     }
   }
 
@@ -649,8 +702,13 @@ class UploadService {
       if (fields != null) ...fields,
     };
 
+    final attempt = deviceAssetId == null ? 0 : (_rejectAttempts[deviceAssetId] ?? 0);
+    final taskId = deviceAssetId == null
+        ? null
+        : (attempt == 0 ? deviceAssetId : '$deviceAssetId#r$attempt');
+
     return UploadTask(
-      taskId: deviceAssetId,
+      taskId: taskId,
       displayName: originalFileName ?? filename,
       httpRequestMethod: 'POST',
       url: url,

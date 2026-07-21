@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/infrastructure/entities/local_asset.entity.dart';
+import 'package:immich_mobile/infrastructure/entities/local_asset.entity.drift.dart';
 import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 
@@ -15,6 +16,21 @@ final backupRepositoryProvider = Provider<DriftBackupRepository>(
 class DriftBackupRepository extends DriftDatabaseRepository {
   final Drift _db;
   const DriftBackupRepository(this._db) : super(_db);
+
+  /// Aligne le checksum local sur celui de l'asset distant [remoteAssetId].
+  /// Cas "duplicate" : le serveur possède déjà le contenu uploadé mais notre
+  /// hash local (calculé avant une modification du fichier) ne matche aucun
+  /// asset distant — sans réconciliation, l'asset serait ré-uploadé en boucle.
+  Future<bool> reconcileChecksumFromRemote(String localAssetId, String remoteAssetId) async {
+    final remote = await (_db.remoteAssetEntity.select()..where((r) => r.id.equals(remoteAssetId))).getSingleOrNull();
+    if (remote == null) {
+      return false;
+    }
+    final updated = await (_db.localAssetEntity.update()
+          ..where((l) => l.id.equals(localAssetId)))
+        .write(LocalAssetEntityCompanion(checksum: Value(remote.checksum)));
+    return updated > 0;
+  }
 
   _getExcludedSubquery() {
     return _db.localAlbumAssetEntity.selectOnly()

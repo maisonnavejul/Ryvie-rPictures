@@ -134,6 +134,14 @@ class DriftBackupState {
 
   final int sessionCompletedCount;
   final int sessionTotalCount;
+
+  /// Valeur de [backupCount] (vérité DB) au démarrage de la session courante.
+  /// La progression affichée est dérivée de la DB par rapport à cette base :
+  ///   X (fait cette session) = backupCount - sessionBaselineBackupCount
+  /// Ainsi un fichier n'est compté "fait" que lorsque le serveur l'a réellement
+  /// confirmé (entrée dans remote_asset_entity), jamais de façon optimiste — le
+  /// compteur ne recule donc plus au redémarrage.
+  final int sessionBaselineBackupCount;
   final DateTime? sessionStartTime;
   final int sessionUploadedBytes;
   final bool isStartingBackup;
@@ -158,6 +166,7 @@ class DriftBackupState {
     this.error = BackupError.none,
     this.sessionCompletedCount = 0,
     this.sessionTotalCount = 0,
+    this.sessionBaselineBackupCount = 0,
     this.sessionStartTime,
     this.sessionUploadedBytes = 0,
     this.isStartingBackup = false,
@@ -187,6 +196,7 @@ class DriftBackupState {
     BackupError? error,
     int? sessionCompletedCount,
     int? sessionTotalCount,
+    int? sessionBaselineBackupCount,
     DateTime? sessionStartTime,
     int? sessionUploadedBytes,
     bool? isStartingBackup,
@@ -208,6 +218,7 @@ class DriftBackupState {
       error: error ?? this.error,
       sessionCompletedCount: sessionCompletedCount ?? this.sessionCompletedCount,
       sessionTotalCount: sessionTotalCount ?? this.sessionTotalCount,
+      sessionBaselineBackupCount: sessionBaselineBackupCount ?? this.sessionBaselineBackupCount,
       sessionStartTime: sessionStartTime ?? this.sessionStartTime,
       sessionUploadedBytes: sessionUploadedBytes ?? this.sessionUploadedBytes,
       isStartingBackup: isStartingBackup ?? this.isStartingBackup,
@@ -228,32 +239,41 @@ class DriftBackupState {
               uploadItems.isNotEmpty) &&
           !isCanceling;
 
-  /// Total affiché dans "Upload en cours X / Y" = ce qui a été uploadé +
-  /// ce qui reste réellement à faire (sans doublons, sans iCloud-only).
+  /// Progression "Upload en cours X / Y", entièrement dérivée de la vérité DB.
   ///
-  /// Garantie : quand `X == Y`, le backup est VRAIMENT terminé. Pendant
-  /// le hashing, Y peut converger depuis une valeur haute (estimation de
-  /// départ) vers la valeur finale (= nombre réel de fichiers à uploader,
-  /// après identification des doublons et des iCloud-only).
+  /// Garantie : quand `X == Y`, tous les fichiers atteignables de la session
+  /// sont réellement confirmés par le serveur. Les iCloud-only injoignables
+  /// (`unreachableCount`) sont exclus de Y, comme la card "Restant".
   ///
-  /// On retire `unreachableCount` (iCloud-only) pour rester cohérent avec
-  /// la card "Restant" qui les exclut aussi.
+  /// Fichiers réellement confirmés par le serveur DEPUIS le début de la session
+  /// (jamais optimiste). C'est le "X" de "X / Y".
+  int get sessionCompleted {
+    final done = backupCount - sessionBaselineBackupCount;
+    return done > 0 ? done : 0;
+  }
+
   int get displayedSessionTotal {
-    return sessionCompletedCount + effectiveRemainderCount;
+    // Y = tout ce que la session doit faire = déjà confirmé cette session
+    // + ce qui reste réellement (hors iCloud injoignables). Comme X et Y
+    // dérivent du MÊME instantané DB, ils bougent en phase : pas de gonflement
+    // pendant l'upload, pas de recul au redémarrage.
+    final total = totalCount - sessionBaselineBackupCount - unreachableCount;
+    return total > 0 ? total : 0;
   }
 
   double get sessionProgress {
     final total = displayedSessionTotal;
     if (total == 0) return 0;
-    return sessionCompletedCount / total;
+    final p = sessionCompleted / total;
+    return p > 1 ? 1 : p;
   }
 
   Duration? get estimatedTimeRemaining {
-    if (sessionStartTime == null || sessionCompletedCount == 0) return null;
+    if (sessionStartTime == null || sessionCompleted == 0) return null;
     final elapsed = DateTime.now().difference(sessionStartTime!);
-    final remaining = displayedSessionTotal - sessionCompletedCount;
+    final remaining = displayedSessionTotal - sessionCompleted;
     if (remaining <= 0) return Duration.zero;
-    final msPerFile = elapsed.inMilliseconds / sessionCompletedCount;
+    final msPerFile = elapsed.inMilliseconds / sessionCompleted;
     return Duration(milliseconds: (msPerFile * remaining).round());
   }
 
@@ -287,6 +307,7 @@ class DriftBackupState {
         other.error == error &&
         other.sessionCompletedCount == sessionCompletedCount &&
         other.sessionTotalCount == sessionTotalCount &&
+        other.sessionBaselineBackupCount == sessionBaselineBackupCount &&
         other.sessionUploadedBytes == sessionUploadedBytes;
   }
 
@@ -304,6 +325,7 @@ class DriftBackupState {
         error.hashCode ^
         sessionCompletedCount.hashCode ^
         sessionTotalCount.hashCode ^
+        sessionBaselineBackupCount.hashCode ^
         sessionUploadedBytes.hashCode;
   }
 }
@@ -804,9 +826,13 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
               );
             }
 
+            // On NE marque PAS le fichier "sauvegardé" ici de façon optimiste.
+            // backupCount / remainderCount restent pilotés par la vérité DB
+            // (remote_asset_entity, rafraîchie en direct par les websockets
+            // AssetUploadReadyV1 + le poller getBackupStatus). sessionCompletedCount
+            // reste un compteur temps-réel des tâches terminées, utilisé
+            // uniquement par le health-check pour détecter la progression.
             state = state.copyWith(
-              backupCount: state.backupCount + 1,
-              remainderCount: state.remainderCount > 0 ? state.remainderCount - 1 : 0,
               sessionCompletedCount: newCompleted,
               sessionUploadedBytes: newTotalBytes,
             );
@@ -948,6 +974,13 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
   Future<void> getBackupStatus(String userId) async {
     final counts = await _uploadService.getBackupCounts(userId);
 
+    // Vérité DB uniquement. Un fichier n'est "sauvegardé" que si son checksum
+    // local correspond à une ligne remote_asset_entity — table remplie en direct
+    // par les websockets AssetUploadReadyV1 pendant la session, et réconciliée
+    // par syncRemote. Aucun optimisme en mémoire : backupCount monte au rythme
+    // des confirmations serveur et ne recule jamais au redémarrage.
+    // La progression de session (X / Y) est dérivée de ces valeurs via
+    // sessionBaselineBackupCount (voir getters sessionCompleted / displayedSessionTotal).
     state = state.copyWith(
       totalCount: counts.total,
       backupCount: counts.total - counts.remainder,
@@ -976,6 +1009,21 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
     _logger.info("startBackup: queuing candidates (remainder=${state.remainderCount})");
     _currentUserId = userId;
     _ensureWatchdogRunning();
+
+    // If there's already a session in progress (handleBackupResume calling us
+    // after the queue temporarily drained between batches), DO NOT reset the
+    // visible counters — the user would see "0 / X" instead of their progress.
+    // Treat this as a "continue", not a fresh start.
+    final isFreshSession = state.sessionCompletedCount == 0 && state.sessionStartTime == null;
+
+    // Pour une nouvelle session, on rafraîchit d'abord la vérité DB afin que la
+    // base (sessionBaselineBackupCount) parte de la valeur réellement confirmée
+    // par le serveur — certains chemins (toggle) appellent startBackup après un
+    // syncRemote sans repasser par getBackupStatus, d'où backupCount potentiellement obsolète.
+    if (isFreshSession) {
+      await getBackupStatus(userId);
+    }
+
     // Don't blindly set sessionTotalCount = remainderCount: if hashing hasn't
     // produced candidates yet (remainder=0), we'd lock the total at 0 forever.
     // Use the larger of (remainder, current total) so we never decrease it.
@@ -983,17 +1031,15 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
         ? state.remainderCount
         : state.sessionTotalCount;
 
-    // If there's already a session in progress (handleBackupResume calling us
-    // after the queue temporarily drained between batches), DO NOT reset the
-    // visible counters — the user would see "0 / X" instead of their progress.
-    // Treat this as a "continue", not a fresh start.
-    final isFreshSession = state.sessionCompletedCount == 0 && state.sessionStartTime == null;
     if (isFreshSession) {
       _byteSamples.clear(); // fresh session → fresh speed window
       state = state.copyWith(
         error: BackupError.none,
         sessionCompletedCount: 0,
         sessionTotalCount: newTotal,
+        // Fige la base DB : X = backupCount - base. state.backupCount vient
+        // d'être rafraîchi par le getBackupStatus ci-dessus (vérité DB).
+        sessionBaselineBackupCount: state.backupCount,
         sessionStartTime: DateTime.now(),
         sessionUploadedBytes: 0,
         isStartingBackup: true,
@@ -1035,10 +1081,17 @@ class DriftBackupNotifier extends StateNotifier<DriftBackupState> {
     // Without this, sessionStartTime stays null → average speed is 0 → "— MB/s"
     // shown forever even while bytes are flowing.
     final initSession = state.sessionStartTime == null;
+    if (initSession) {
+      // Fige la baseline DB comme dans startBackup, sinon X/Y de la card
+      // "Upload en cours" repartent du total global (ex: 11644/11660) au lieu
+      // de la progression sur le restant de cette session (ex: 0/16).
+      await getBackupStatus(userId);
+    }
     state = state.copyWith(
       isStartingBackup: true,
       sessionStartTime: initSession ? DateTime.now() : null,
       sessionTotalCount: initSession ? state.remainderCount : null,
+      sessionBaselineBackupCount: initSession ? state.backupCount : null,
     );
     try {
       await _uploadService.startBackup(userId, _updateEnqueueCount, _updatePrepProgress, _updateUnreachable);

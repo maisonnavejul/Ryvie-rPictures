@@ -323,7 +323,23 @@ class _SyncStatusIndicatorState extends ConsumerState<_SyncStatusIndicator> with
   @override
   Widget build(BuildContext context) {
     final syncStatus = ref.watch(syncStatusProvider);
-    final isSyncing = syncStatus.isRemoteSyncing || syncStatus.isLocalSyncing;
+    final backupState = ref.watch(driftBackupProvider);
+    final backupEnabled = ref.watch(settingsProvider).get(Setting.enableBackup);
+    // Tant que la sauvegarde n'est pas réellement terminée (sync locale/distante,
+    // hashing, préparation de la queue ou upload en cours), on garde le spinner.
+    //
+    // On s'appuie sur `effectiveRemainderCount > 0` (et pas seulement sur
+    // `isUploading`) : pendant les cool-downs iOS la file se vide puis se
+    // remplit à chaque cycle, ce qui faisait clignoter le spinner. Le nombre de
+    // fichiers restants, lui, reste stable tant que tout n'est pas uploadé.
+    final hasPendingBackup = backupEnabled && backupState.effectiveRemainderCount > 0;
+    final isSyncing =
+        syncStatus.isRemoteSyncing ||
+        syncStatus.isLocalSyncing ||
+        syncStatus.isHashing ||
+        backupState.isStartingBackup ||
+        backupState.isUploading ||
+        hasPendingBackup;
 
     // Control animations based on sync status
     if (isSyncing) {

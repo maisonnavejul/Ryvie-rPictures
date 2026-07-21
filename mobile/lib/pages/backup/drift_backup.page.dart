@@ -61,7 +61,11 @@ class _DriftBackupPageState extends ConsumerState<DriftBackupPage> {
       // initial toggle-triggered startBackup ran before hashing produced files).
       if (!mounted) return;
       final s = ref.read(driftBackupProvider);
-      if (s.remainderCount > 0 && !s.isStartingBackup) {
+      // effectiveRemainderCount (et non remainderCount) : sinon, quand il ne
+      // reste que des fichiers iCloud injoignables ou non hashés, chaque retour
+      // sur la page relançait la préparation de milliers de candidats déjà
+      // sauvegardés.
+      if (s.effectiveRemainderCount > 0 && !s.isStartingBackup) {
         await ref.read(driftBackupProvider.notifier).continueBackup(currentUser.id);
       }
     });
@@ -429,7 +433,7 @@ class _UploadProgressCard extends ConsumerWidget {
     final isEnqueuing = backupState.enqueueTotalCount > 0 && uploadItems.isEmpty && !hasStartedUploading;
     final isLooseProgress = isSyncing || isStartingNoEnqueueYet || isEnqueuing;
 
-    final completed = backupState.sessionCompletedCount;
+    final completed = backupState.sessionCompleted;
     final total = backupState.displayedSessionTotal;
     final progress = backupState.sessionProgress;
     final eta = backupState.estimatedTimeRemaining;

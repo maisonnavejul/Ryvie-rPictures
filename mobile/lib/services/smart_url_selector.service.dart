@@ -201,16 +201,68 @@ class SmartUrlSelectorService {
 
       // Récupérer automatiquement les informations du tunnel en arrière-plan
       // Le token sera récupéré automatiquement du Store dans fetchAndSaveTunnelInfo
-      fetchAndSaveTunnelInfo().catchError((e) {
-        _log.warning('Erreur lors de la récupération auto des infos tunnel: $e');
-      });
+      unawaited(
+        fetchAndSaveTunnelInfo().catchError((e) {
+          _log.warning('Erreur lors de la récupération auto des infos tunnel: $e');
+        }),
+      );
 
       return (url: localServerUrl, isLocal: true);
     }
 
-    // 2. La connexion locale a échoué, essayer l'URL publique
+    // 2. Essayer l'URL locale personnalisée (ex: IP saisie à la main quand
+    // mDNS/ryvie.local ne résout pas — simulateur, certains routeurs)
+    final customLocal = await _trySavedCustomLocalUrl();
+    if (customLocal != null) {
+      return customLocal;
+    }
+
+    // 3. La connexion locale a échoué, essayer l'URL publique
     _log.info('❌ Connexion locale échouée - Tentative connexion PUBLIQUE');
     return _selectPublicUrlOrThrow();
+  }
+
+  /// Teste l'URL locale personnalisée mémorisée au login (StoreKey.localEndpoint).
+  /// Retourne null si absente, injoignable, ou si le ryvieId ne correspond pas.
+  Future<({String url, bool isLocal})?> _trySavedCustomLocalUrl() async {
+    final customUrl = Store.tryGet(StoreKey.localEndpoint);
+    if (customUrl == null || customUrl.isEmpty || customUrl == localServerUrl) {
+      return null;
+    }
+
+    _log.info('🔍 Test connexion LOCALE personnalisée: $customUrl');
+    final reachable = await _testUrlConnection(customUrl);
+    if (!reachable) {
+      _log.info('❌ URL locale personnalisée injoignable');
+      return null;
+    }
+
+    // Pas de rejet sur mismatch de ryvieId ici : cette URL a été saisie
+    // explicitement par l'utilisateur au login, elle fait donc autorité.
+    // En pratique le ryvieId mémorisé (API cloud Ryvie) peut différer du
+    // machine-id exposé sur :3002 pour la même machine, ce qui provoquait
+    // un faux "AUTRE Ryvie" et un repli à tort sur le tunnel.
+    final savedRyvieId = Store.tryGet(StoreKey.ryvieId);
+    if (savedRyvieId != null && savedRyvieId.isNotEmpty) {
+      final host = Uri.tryParse(customUrl)?.host;
+      if (host != null && host.isNotEmpty) {
+        final localRyvieId = await _fetchRyvieIdQuick('http://$host:3002/api/machine-id');
+        if (localRyvieId != null && localRyvieId != savedRyvieId) {
+          _log.warning(
+            '⚠️  ryvieId différent sur $customUrl (id=$localRyvieId, attendu=$savedRyvieId) — '
+            'URL saisie manuellement, on continue quand même',
+          );
+        }
+      }
+    }
+
+    _log.info('✅ Connexion LOCALE personnalisée réussie - Utilisation de $customUrl');
+    unawaited(
+      fetchAndSaveTunnelInfo().catchError((e) {
+        _log.warning('Erreur lors de la récupération auto des infos tunnel: $e');
+      }),
+    );
+    return (url: customUrl, isLocal: true);
   }
 
   /// Retourne true si une URL publique ou un tunnelHost est sauvegardé.
@@ -249,12 +301,16 @@ class SmartUrlSelectorService {
   /// Récupère rapidement le ryvieId du Ryvie qui répond actuellement sur
   /// ryvie.local. Timeout court (2s) — c'est juste pour confirmer qu'on est
   /// bien sur notre Ryvie avant de l'utiliser. Renvoie null en cas d'échec.
-  Future<String?> _fetchLocalRyvieIdQuick() async {
+  Future<String?> _fetchLocalRyvieIdQuick() => _fetchRyvieIdQuick(localMachineIdUrl);
+
+  /// Variante générique : lit le ryvieId exposé par /api/machine-id à l'URL
+  /// donnée (utilisé aussi pour vérifier une IP locale saisie à la main).
+  Future<String?> _fetchRyvieIdQuick(String machineIdUrl) async {
     try {
       final client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 2);
       final request = await client
-          .getUrl(Uri.parse(localMachineIdUrl))
+          .getUrl(Uri.parse(machineIdUrl))
           .timeout(const Duration(seconds: 2));
       final response = await request.close().timeout(const Duration(seconds: 2));
       if (response.statusCode == 200) {

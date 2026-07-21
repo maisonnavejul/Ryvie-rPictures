@@ -62,6 +62,16 @@ class AuthService {
     await _apiService.setDeviceInfoHeader();
     await Store.put(StoreKey.serverUrl, validUrl);
 
+    // Si l'utilisateur a saisi une URL personnalisée (ex: IP locale du Ryvie,
+    // utile quand mDNS/ryvie.local ne résout pas — simulateur, certains
+    // routeurs), on la mémorise pour que la sélection intelligente d'URL la
+    // réessaie aux prochains démarrages au lieu de basculer sur le tunnel.
+    final publicUrl = Store.tryGet(StoreKey.publicUrl);
+    if (url != SmartUrlSelectorService.localServerUrl && url != publicUrl) {
+      await Store.put(StoreKey.localEndpoint, url);
+      _log.info('💾 URL locale personnalisée mémorisée: $url');
+    }
+
     return validUrl;
   }
 

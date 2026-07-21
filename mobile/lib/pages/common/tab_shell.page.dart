@@ -5,10 +5,15 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/constants.dart';
+import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
+import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/presentation/pages/search/paginated_search.provider.dart';
+import 'package:immich_mobile/providers/background_sync.provider.dart';
+import 'package:immich_mobile/providers/connection_status.provider.dart';
+import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
 import 'package:immich_mobile/providers/haptic_feedback.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/album.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/memory.provider.dart';
@@ -17,6 +22,7 @@ import 'package:immich_mobile/providers/infrastructure/readonly_mode.provider.da
 import 'package:immich_mobile/providers/search/search_input_focus.provider.dart';
 import 'package:immich_mobile/providers/tab.provider.dart';
 import 'package:immich_mobile/providers/timeline/multiselect.provider.dart';
+import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/routing/router.dart';
 import 'package:immich_mobile/widgets/common/connection_error_banner.dart';
 import 'package:immich_mobile/providers/server_health_check.provider.dart';
@@ -30,17 +36,63 @@ class TabShellPage extends ConsumerStatefulWidget {
 }
 
 class _TabShellPageState extends ConsumerState<TabShellPage> {
+  bool _backupKickRunning = false;
+  ProviderSubscription<ConnectionStatusState>? _connectionSubscription;
+
   @override
   void initState() {
     super.initState();
     // Lancer un health check unique quand l'utilisateur arrive sur la page principale
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(serverHealthCheckProvider).performHealthCheck();
+      _startBackupIfEnabled();
     });
+
+    // Si le serveur n'était pas joignable au lancement, relancer la sync +
+    // backup dès que la connexion est rétablie.
+    _connectionSubscription = ref.listenManual<ConnectionStatusState>(connectionStatusProvider, (previous, next) {
+      if (previous?.status != ConnectionStatus.connected && next.status == ConnectionStatus.connected) {
+        _startBackupIfEnabled();
+      }
+    });
+  }
+
+  /// Même comportement que la page Sauvegarde : sync distante → refresh des
+  /// compteurs → top-up de la queue d'upload. Sans ça, le backup ne démarre
+  /// que lorsque l'utilisateur ouvre manuellement la page Sauvegarde.
+  Future<void> _startBackupIfEnabled() async {
+    if (_backupKickRunning) return;
+    if (!Store.get(StoreKey.enableBackup, false)) return;
+    final currentUser = ref.read(currentUserProvider);
+    if (currentUser == null) return;
+
+    _backupKickRunning = true;
+    try {
+      final notifier = ref.read(driftBackupProvider.notifier);
+      await notifier.getBackupStatus(currentUser.id);
+      if (!mounted) return;
+
+      if (!ref.read(driftBackupProvider).isSyncing) {
+        notifier.updateSyncing(true);
+        await ref.read(backgroundSyncProvider).syncRemote();
+        if (!mounted) return;
+        notifier.updateSyncing(false);
+        await notifier.getBackupStatus(currentUser.id);
+      }
+
+      if (!mounted) return;
+      final state = ref.read(driftBackupProvider);
+      if (state.effectiveRemainderCount > 0 && !state.isStartingBackup) {
+        await notifier.continueBackup(currentUser.id);
+      }
+    } finally {
+      _backupKickRunning = false;
+    }
   }
 
   @override
   void dispose() {
+    _connectionSubscription?.close();
     // Arrêter le retry loop quand l'utilisateur quitte la page
     ref.read(serverHealthCheckProvider).stopRetryLoop();
     super.dispose();

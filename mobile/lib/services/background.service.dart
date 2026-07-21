@@ -143,6 +143,7 @@ class BackgroundService {
   }
 
   /// Updates the notification shown by the background service
+  /// Ryvie: sync-progress notifications are disabled, only error notifications remain
   Future<bool?> _updateNotification({
     String? title,
     String? content,
@@ -152,21 +153,6 @@ class BackgroundService {
     bool isDetail = false,
     bool onlyIfFG = false,
   }) async {
-    try {
-      if (_isBackgroundInitialized) {
-        return _backgroundChannel.invokeMethod<bool>('updateNotification', [
-          title,
-          content,
-          progress,
-          max,
-          indeterminate,
-          isDetail,
-          onlyIfFG,
-        ]);
-      }
-    } catch (error) {
-      dPrint(() => "[_updateNotification] failed to communicate with plugin");
-    }
     return false;
   }
 
