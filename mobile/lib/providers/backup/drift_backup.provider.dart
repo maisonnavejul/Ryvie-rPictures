@@ -176,10 +176,14 @@ class DriftBackupState {
     this.unreachableCount = 0,
   });
 
-  /// Remainder count minus files we already know are unreachable (e.g. iCloud).
+  /// Remainder count minus files we already know are unreachable (e.g. iCloud)
+  /// minus files without checksum (processing) : un fichier non hashé n'est
+  /// jamais candidat à l'upload — typiquement un original resté sur iCloud que
+  /// le hashing n'a pas pu lire. Sans cette soustraction, "Restant" affiche
+  /// indéfiniment ces fichiers alors qu'aucun upload n'est possible.
   /// This is what the UI should use to decide if there's still "work" to do.
   int get effectiveRemainderCount {
-    final eff = remainderCount - unreachableCount;
+    final eff = remainderCount - unreachableCount - processingCount;
     return eff > 0 ? eff : 0;
   }
 
@@ -254,10 +258,12 @@ class DriftBackupState {
 
   int get displayedSessionTotal {
     // Y = tout ce que la session doit faire = déjà confirmé cette session
-    // + ce qui reste réellement (hors iCloud injoignables). Comme X et Y
-    // dérivent du MÊME instantané DB, ils bougent en phase : pas de gonflement
-    // pendant l'upload, pas de recul au redémarrage.
-    final total = totalCount - sessionBaselineBackupCount - unreachableCount;
+    // + ce qui reste réellement (hors iCloud injoignables et hors fichiers
+    // sans checksum, non uploadables). Comme X et Y dérivent du MÊME
+    // instantané DB, ils bougent en phase : pas de gonflement pendant
+    // l'upload, pas de recul au redémarrage, et pas de "2/6 bloqué" quand
+    // les 4 restants sont impossibles à uploader.
+    final total = totalCount - sessionBaselineBackupCount - unreachableCount - processingCount;
     return total > 0 ? total : 0;
   }
 
