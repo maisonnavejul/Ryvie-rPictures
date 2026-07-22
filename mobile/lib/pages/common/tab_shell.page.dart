@@ -11,6 +11,7 @@ import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/presentation/pages/search/paginated_search.provider.dart';
+import 'package:immich_mobile/presentation/widgets/images/remote_image_provider.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/connection_status.provider.dart';
 import 'package:immich_mobile/providers/backup/drift_backup.provider.dart';
@@ -53,8 +54,23 @@ class _TabShellPageState extends ConsumerState<TabShellPage> {
     _connectionSubscription = ref.listenManual<ConnectionStatusState>(connectionStatusProvider, (previous, next) {
       if (previous?.status != ConnectionStatus.connected && next.status == ConnectionStatus.connected) {
         _startBackupIfEnabled();
+        _reloadMemoryThumbnails();
       }
     });
+  }
+
+  /// Les vignettes des souvenirs chargées pendant que le serveur était
+  /// injoignable restent noires : le cache image de Flutter mémorise l'échec
+  /// (clé = assetId). On évince donc ces entrées échouées avant de recharger
+  /// la liste, sinon `invalidate` seul renverrait le même completer en erreur.
+  void _reloadMemoryThumbnails() {
+    final memories = ref.read(driftMemoryFutureProvider).value ?? const [];
+    for (final memory in memories) {
+      if (memory.assets.isNotEmpty) {
+        RemoteThumbProvider(assetId: memory.assets.first.id).evict();
+      }
+    }
+    ref.invalidate(driftMemoryFutureProvider);
   }
 
   /// Même comportement que la page Sauvegarde : sync distante → refresh des

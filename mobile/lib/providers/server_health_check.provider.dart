@@ -19,7 +19,37 @@ class ServerHealthCheckNotifier {
   Timer? _retryTimer;
   bool _errorAlreadyShown = false;
 
+  /// Nombre d'échecs consécutifs avant d'afficher l'erreur "Ryvie injoignable".
+  /// Laisse au VPN/tunnel le temps de finir de se connecter (~15 s avec un
+  /// retry toutes les 5 s) avant d'alarmer l'utilisateur.
+  static const int _kFailureThreshold = 3;
+  int _consecutiveFailures = 0;
+
+  static const String _kGenericErrorMessage =
+      'Impossible de se connecter à votre Ryvie.\n\n'
+      'Vérifiez que :\n'
+      '• Votre téléphone a accès à Internet\n'
+      '• L\'application Ryvie Connect est ouverte sur votre téléphone principal\n\n'
+      'Si vous êtes chez vous, reconnectez-vous au WiFi.';
+
   ServerHealthCheckNotifier(this._ref);
+
+  /// Enregistre un échec de health check. N'affiche le message d'erreur
+  /// qu'après [_kFailureThreshold] échecs consécutifs, pour éviter le faux
+  /// positif pendant que le VPN/tunnel est encore en train de se connecter.
+  void _handleFailure(String message, {bool startRetry = true}) {
+    _consecutiveFailures++;
+    if (_consecutiveFailures >= _kFailureThreshold && !_errorAlreadyShown) {
+      _log.info('🔴 Affichage du message d\'erreur après $_consecutiveFailures échecs consécutifs');
+      _ref.read(connectionStatusProvider.notifier).setTunnelUnavailable(message);
+      _errorAlreadyShown = true;
+    } else {
+      _log.info('⏭️  Échec $_consecutiveFailures/$_kFailureThreshold — on attend avant d\'alarmer');
+    }
+    if (startRetry) {
+      startRetryLoop();
+    }
+  }
 
   /// Lance un health check unique (au démarrage de l'app)
   /// Vérifie aussi le ryvieId pour les connexions locales
@@ -134,8 +164,9 @@ class ServerHealthCheckNotifier {
       // Arrêter le retry loop si actif
       stopRetryLoop();
 
-      // Réinitialiser le flag d'erreur pour la prochaine fois
+      // Réinitialiser le flag d'erreur et le compteur d'échecs
       _errorAlreadyShown = false;
+      _consecutiveFailures = 0;
 
       // Marquer comme connecté
       _ref.read(connectionStatusProvider.notifier).setConnected(serverUrl);
@@ -145,60 +176,20 @@ class ServerHealthCheckNotifier {
       _ref.invalidate(connectionStatusProvider);
     } on TimeoutException catch (e) {
       _log.severe('❌ Timeout du health check', e);
-
-      // N'afficher le message d'erreur qu'une seule fois
-      if (!_errorAlreadyShown) {
-        _log.info('🔴 Affichage du message d\'erreur (première fois)');
-        _ref
-            .read(connectionStatusProvider.notifier)
-            .setTunnelUnavailable(
-              'Impossible de se connecter à votre Ryvie.\n\n'
-              'Vérifiez que :\n'
-              '• Votre téléphone a accès à Internet\n'
-              '• L\'application Ryvie Connect est ouverte sur votre téléphone principal\n\n'
-              'Si vous êtes chez vous, reconnectez-vous au WiFi.',
-            );
-        _errorAlreadyShown = true;
-      } else {
-        _log.info('⏭️  Erreur détectée mais message déjà affiché, skip');
-      }
-
-      // Démarrer le retry loop pour tenter de se reconnecter
-      startRetryLoop();
+      _handleFailure(_kGenericErrorMessage);
     } on SocketException catch (e) {
       _log.severe('❌ Erreur réseau lors du health check', e);
-
-      // N'afficher le message d'erreur qu'une seule fois
-      if (!_errorAlreadyShown) {
-        _log.info('🔴 Affichage du message d\'erreur (première fois)');
-        _ref
-            .read(connectionStatusProvider.notifier)
-            .setTunnelUnavailable(
-              'Impossible de se connecter à votre Ryvie.\n\n'
-              'Vérifiez que :\n'
-              '• Votre téléphone a accès à Internet\n'
-              '• L\'application Ryvie Connect est ouverte sur votre téléphone principal\n\n'
-              'Si vous êtes chez vous, reconnectez-vous au WiFi.',
-            );
-        _errorAlreadyShown = true;
-      } else {
-        _log.info('⏭️  Erreur détectée mais message déjà affiché, skip');
-      }
-
-      // Démarrer le retry loop pour tenter de se reconnecter
-      startRetryLoop();
+      _handleFailure(_kGenericErrorMessage);
     } catch (e, stackTrace) {
       _log.severe('❌ Erreur inattendue lors du health check', e, stackTrace);
 
       // Vérifier si c'est une erreur de RyvieId mismatch
       final isRyvieIdMismatch = e.toString().contains('RYVIE_ID_MISMATCH');
 
-      // N'afficher le message d'erreur qu'une seule fois
-      if (!_errorAlreadyShown) {
-        _log.info('🔴 Affichage du message d\'erreur (première fois)');
-
-        if (isRyvieIdMismatch) {
-          // Message spécifique pour RyvieId différent
+      if (isRyvieIdMismatch) {
+        // RyvieId mismatch : erreur définitive, on affiche immédiatement et on
+        // ne relance pas le retry loop.
+        if (!_errorAlreadyShown) {
           _ref
               .read(connectionStatusProvider.notifier)
               .setTunnelUnavailable(
@@ -206,26 +197,10 @@ class ServerHealthCheckNotifier {
                 'L\'application est configurée pour un autre Ryvie.\n\n'
                 'Si vous avez changé de Ryvie, veuillez vous déconnecter et vous reconnecter.',
               );
-        } else {
-          // Message générique pour les autres erreurs
-          _ref
-              .read(connectionStatusProvider.notifier)
-              .setTunnelUnavailable(
-                'Impossible de se connecter à votre Ryvie.\n\n'
-                'Vérifiez que :\n'
-                '• Votre téléphone a accès à Internet\n'
-                '• L\'application Ryvie Connect est ouverte sur votre téléphone principal\n\n'
-                'Si vous êtes chez vous, reconnectez-vous au WiFi.',
-              );
+          _errorAlreadyShown = true;
         }
-        _errorAlreadyShown = true;
       } else {
-        _log.info('⏭️  Erreur détectée mais message déjà affiché, skip');
-      }
-
-      // Ne pas démarrer le retry loop si c'est un problème de RyvieId mismatch
-      if (!isRyvieIdMismatch) {
-        startRetryLoop();
+        _handleFailure(_kGenericErrorMessage);
       }
     } finally {
       _isChecking = false;
